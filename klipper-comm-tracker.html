@@ -251,6 +251,29 @@
 
     #clear-btn { background: #2a1a00; }
     #clear-btn:hover { background: #4a3000; }
+
+    /* ── View toggle tabs ─────────────────────────────────────── */
+    .view-tabs {
+      display: flex;
+      gap: 4px;
+    }
+
+    .tab-btn {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.82rem;
+      padding: 5px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .tab-btn:hover { filter: brightness(1.2); }
+    .tab-btn.active {
+      background: #0f3460;
+      border-color: var(--blue);
+      color: var(--blue);
+    }
   </style>
 </head>
 
@@ -260,6 +283,10 @@
 <header>
   <h1>🖨️ Klipper Comm Tracker</h1>
   <span class="history-info">10 s buckets · up to 12 h history</span>
+  <div class="view-tabs">
+    <button id="tab-device" class="tab-btn active" onclick="setView('device')">By Device</button>
+    <button id="tab-stat"   class="tab-btn"        onclick="setView('stat')">By Stat</button>
+  </div>
   <div class="conn-form">
     <input type="text" id="host-input" placeholder="Moonraker host (e.g. 192.168.1.100)" />
     <button id="connect-btn"    onclick="connect()">Connect</button>
@@ -281,15 +308,31 @@
     <p>Enter the Moonraker host and click <strong>Connect</strong> to start tracking.</p>
   </div>
 
-  <section id="mcu-section" style="display:none">
-    <h2>MCU Statistics</h2>
-    <div class="panels-grid" id="mcu-panels"></div>
-  </section>
+  <!-- ── By-Device view ─────────────────────────────────────── -->
+  <div id="view-device">
+    <section id="mcu-section" style="display:none">
+      <h2>MCU Statistics — By Device</h2>
+      <div class="panels-grid" id="mcu-panels"></div>
+    </section>
 
-  <section id="canbus-section" style="display:none">
-    <h2>CAN Bus Statistics</h2>
-    <div class="panels-grid" id="canbus-panels"></div>
-  </section>
+    <section id="canbus-section" style="display:none">
+      <h2>CAN Bus Statistics — By Device</h2>
+      <div class="panels-grid" id="canbus-panels"></div>
+    </section>
+  </div>
+
+  <!-- ── By-Stat view ───────────────────────────────────────── -->
+  <div id="view-stat" style="display:none">
+    <section id="mcu-stat-section" style="display:none">
+      <h2>MCU Statistics — By Stat (all MCUs)</h2>
+      <div class="panels-grid" id="mcu-stat-panels"></div>
+    </section>
+
+    <section id="canbus-stat-section" style="display:none">
+      <h2>CAN Bus Statistics — By Stat (all interfaces)</h2>
+      <div class="panels-grid" id="canbus-stat-panels"></div>
+    </section>
+  </div>
 
   <div id="log"></div>
 
@@ -309,26 +352,55 @@ const RPC_TIMEOUT_MS = 12_000;                    // JSON-RPC call timeout
 const MAX_LOG_LINES  = 120;                       // max lines kept in the log panel
 
 const COLORS = {
-  retransmit : '#f28c28',
-  invalid    : '#e74c3c',
+  retransmit    : '#f28c28',
+  invalid       : '#e74c3c',
   retransmit_seq: '#f1c40f',
-  write      : '#4d9de0',
-  read       : '#00d4aa',
-  awake      : '#9b59b6',
-  task_avg   : '#3498db',
-  task_stddev: '#2980b9',
-  rx_err     : '#e74c3c',
-  tx_err     : '#f28c28',
-  tx_retry   : '#f1c40f',
+  write         : '#4d9de0',
+  read          : '#00d4aa',
+  awake         : '#9b59b6',
+  task_avg      : '#3498db',
+  task_stddev   : '#2980b9',
+  rx_err        : '#e74c3c',
+  tx_err        : '#f28c28',
+  tx_retry      : '#f1c40f',
 };
+
+// Color palette used for the "By Stat" multi-series charts (one color per device)
+const DEVICE_PALETTE = [
+  '#4d9de0', '#00d4aa', '#f28c28', '#e74c3c',
+  '#9b59b6', '#f1c40f', '#1abc9c', '#e67e22',
+  '#3498db', '#2ecc71', '#e91e63', '#00bcd4',
+];
+
+// Stat definitions for MCU and canbus — used to build the "By Stat" charts.
+// mode: 'last' for cumulative counters, 'avg' for level/rate values.
+// scale: optional function applied before storing (e.g. unit conversion).
+const MCU_STAT_DEFS = [
+  { key: 'bytes_retransmit', label: 'bytes_retransmit', yLabel: 'bytes', mode: 'last', scale: null },
+  { key: 'bytes_invalid',    label: 'bytes_invalid',    yLabel: 'bytes', mode: 'last', scale: null },
+  { key: 'retransmit_seq',   label: 'retransmit_seq',   yLabel: 'seqs',  mode: 'last', scale: null },
+  { key: 'bytes_write',      label: 'bytes_write',      yLabel: 'bytes', mode: 'last', scale: null },
+  { key: 'bytes_read',       label: 'bytes_read',       yLabel: 'bytes', mode: 'last', scale: null },
+  { key: 'mcu_awake',        label: 'mcu_awake',        yLabel: '%',     mode: 'avg',  scale: v => v * 100 },
+  { key: 'mcu_task_avg',     label: 'mcu_task_avg',     yLabel: 'µs',    mode: 'avg',  scale: v => v * 1e6 },
+  { key: 'mcu_task_stddev',  label: 'mcu_task_stddev',  yLabel: 'µs',    mode: 'avg',  scale: v => v * 1e6 },
+];
+
+const CANBUS_STAT_DEFS = [
+  { key: 'rx_error',   label: 'rx_error',   yLabel: 'count', mode: 'last', scale: null },
+  { key: 'tx_error',   label: 'tx_error',   yLabel: 'count', mode: 'last', scale: null },
+  { key: 'tx_retries', label: 'tx_retries', yLabel: 'count', mode: 'last', scale: null },
+];
 
 // ── State ────────────────────────────────────────────────────
 let ws          = null;
 let msgId       = 1;
 let currentHost = null;     // host we last successfully initialised against
-const pending     = {};     // id → {resolve, reject}
-const mcuState    = {};     // name → {errChart, trafficChart, perfChart, prev, statsEl, b*}
-const canbusState = {};     // name → {chart, prev, statsEl, stateEl, b*}
+const pending          = {};  // id → {resolve, reject}
+const mcuState         = {};  // name → {errChart, trafficChart, perfChart, statsEl, b*}
+const canbusState      = {};  // name → {chart, statsEl, stateEl, b*}
+const mcuStatCharts    = {};  // statKey → {chart, buckets:{mcuName→bucket}, def, dsIdx:{mcuName→int}}
+const canbusStatCharts = {};  // statKey → {chart, buckets:{canbusName→bucket}, def, dsIdx:{canbusName→int}}
 
 // ── Logging ──────────────────────────────────────────────────
 function log(msg, cls = '') {
@@ -441,6 +513,14 @@ function disconnect() {
   if (ws) { ws.close(); ws = null; }
 }
 
+// ── View toggle ───────────────────────────────────────────────
+function setView(v) {
+  document.getElementById('view-device').style.display = v === 'device' ? '' : 'none';
+  document.getElementById('view-stat').style.display   = v === 'stat'   ? '' : 'none';
+  document.getElementById('tab-device').classList.toggle('active', v === 'device');
+  document.getElementById('tab-stat').classList.toggle('active', v === 'stat');
+}
+
 // ── Panel lifecycle ───────────────────────────────────────────
 /**
  * Destroy all Chart.js instances, wipe state and DOM, reset tracked host.
@@ -455,12 +535,23 @@ function clearPanels() {
   for (const s of Object.values(canbusState)) {
     s.chart.destroy();
   }
-  for (const k of Object.keys(mcuState))    delete mcuState[k];
-  for (const k of Object.keys(canbusState)) delete canbusState[k];
-  document.getElementById('mcu-panels').innerHTML    = '';
-  document.getElementById('canbus-panels').innerHTML = '';
-  document.getElementById('mcu-section').style.display    = 'none';
-  document.getElementById('canbus-section').style.display = 'none';
+  for (const sc of Object.values(mcuStatCharts))    sc.chart.destroy();
+  for (const sc of Object.values(canbusStatCharts)) sc.chart.destroy();
+
+  for (const k of Object.keys(mcuState))         delete mcuState[k];
+  for (const k of Object.keys(canbusState))       delete canbusState[k];
+  for (const k of Object.keys(mcuStatCharts))     delete mcuStatCharts[k];
+  for (const k of Object.keys(canbusStatCharts))  delete canbusStatCharts[k];
+
+  document.getElementById('mcu-panels').innerHTML         = '';
+  document.getElementById('canbus-panels').innerHTML      = '';
+  document.getElementById('mcu-stat-panels').innerHTML    = '';
+  document.getElementById('canbus-stat-panels').innerHTML = '';
+
+  document.getElementById('mcu-section').style.display          = 'none';
+  document.getElementById('canbus-section').style.display        = 'none';
+  document.getElementById('mcu-stat-section').style.display      = 'none';
+  document.getElementById('canbus-stat-section').style.display   = 'none';
   currentHost = null;
 }
 
@@ -469,28 +560,44 @@ function clearPanels() {
  * keeping panels and structure intact.  Useful mid-session.
  */
 function clearChartData() {
+  // Per-device MCU charts
   for (const s of Object.values(mcuState)) {
     for (const chart of [s.errChart, s.trafficChart, s.perfChart]) {
       chart.data.datasets.forEach(d => { d.data = []; });
       chart.update('none');
     }
-    s.bRetransmit    = makeBuckets('sum');
-    s.bInvalid       = makeBuckets('sum');
-    s.bRetransmitSeq = makeBuckets('sum');
-    s.bWrite         = makeBuckets('sum');
-    s.bRead          = makeBuckets('sum');
+    s.bRetransmit    = makeBuckets('last');
+    s.bInvalid       = makeBuckets('last');
+    s.bRetransmitSeq = makeBuckets('last');
+    s.bWrite         = makeBuckets('last');
+    s.bRead          = makeBuckets('last');
     s.bAwake         = makeBuckets('avg');
     s.bTaskAvg       = makeBuckets('avg');
     s.bTaskStddev    = makeBuckets('avg');
-    s.prev = null;
   }
+  // Per-device canbus charts
   for (const s of Object.values(canbusState)) {
     s.chart.data.datasets.forEach(d => { d.data = []; });
     s.chart.update('none');
-    s.bRxErr   = makeBuckets('sum');
-    s.bTxErr   = makeBuckets('sum');
-    s.bTxRetry = makeBuckets('sum');
-    s.prev = null;
+    s.bRxErr   = makeBuckets('last');
+    s.bTxErr   = makeBuckets('last');
+    s.bTxRetry = makeBuckets('last');
+  }
+  // Stat-grouped MCU charts
+  for (const sc of Object.values(mcuStatCharts)) {
+    sc.chart.data.datasets.forEach(d => { d.data = []; });
+    sc.chart.update('none');
+    for (const name of Object.keys(sc.buckets)) {
+      sc.buckets[name] = makeBuckets(sc.def.mode);
+    }
+  }
+  // Stat-grouped canbus charts
+  for (const sc of Object.values(canbusStatCharts)) {
+    sc.chart.data.datasets.forEach(d => { d.data = []; });
+    sc.chart.update('none');
+    for (const name of Object.keys(sc.buckets)) {
+      sc.buckets[name] = makeBuckets(sc.def.mode);
+    }
   }
   log('Chart data cleared.', 'info');
 }
@@ -520,8 +627,18 @@ async function initialise() {
     mcuObjs.forEach(n    => { if (!mcuState[n])    createMcuPanel(n);    });
     canbusObjs.forEach(n => { if (!canbusState[n]) createCanbusPanel(n); });
 
-    if (mcuObjs.length)    document.getElementById('mcu-section').style.display    = '';
-    if (canbusObjs.length) document.getElementById('canbus-section').style.display = '';
+    // Stat-grouped charts are created once per session (same guard pattern).
+    if (mcuObjs.length    && !mcuStatCharts[MCU_STAT_DEFS[0].key])       createMcuStatCharts(mcuObjs);
+    if (canbusObjs.length && !canbusStatCharts[CANBUS_STAT_DEFS[0].key]) createCanbusStatCharts(canbusObjs);
+
+    if (mcuObjs.length) {
+      document.getElementById('mcu-section').style.display     = '';
+      document.getElementById('mcu-stat-section').style.display = '';
+    }
+    if (canbusObjs.length) {
+      document.getElementById('canbus-section').style.display     = '';
+      document.getElementById('canbus-stat-section').style.display = '';
+    }
 
     // Build subscription request – null means subscribe to all fields
     const subObjects = {};
@@ -611,17 +728,18 @@ function makeChart(ctx, datasets, scales) {
 // ── Bucket aggregation helpers ────────────────────────────────
 /**
  * Create a bucket-series accumulator.
- * @param {'sum'|'avg'} mode  – sum for delta counters, avg for level values
+ * @param {'last'|'avg'|'sum'} mode
+ *   'last' – emit the most-recent sample in the window (best for cumulative counters)
+ *   'avg'  – emit the mean of samples (best for level/rate values)
+ *   'sum'  – emit the sum of samples (legacy, kept for completeness)
  */
-function makeBuckets(mode = 'sum') {
-  return { mode, bucketEnd: 0, acc: 0, count: 0, lastY: 0 };
+function makeBuckets(mode = 'last') {
+  return { mode, bucketEnd: 0, acc: 0, count: 0, lastEmitted: 0 };
 }
 
 /**
  * Feed one raw value into a bucket accumulator.
- * Returns an array of {x, y} points for every bucket that just completed
- * (usually [] while inside a bucket, [point] when a boundary is crossed,
- * rarely more if the clock jumped forward by multiple bucket widths).
+ * Returns an array of {x, y} points for every bucket that just completed.
  */
 function feedBuckets(b, ts, value) {
   const pts = [];
@@ -631,12 +749,19 @@ function feedBuckets(b, ts, value) {
     b.bucketEnd = (Math.floor(ts / BUCKET_MS) + 1) * BUCKET_MS;
   }
 
-  // Flush every completed bucket
+  // Flush every completed bucket before accumulating the new sample
   while (ts >= b.bucketEnd) {
-    const y = (b.mode === 'avg' && b.count > 0)
-              ? b.acc / b.count
-              : b.acc;          // sum mode: 0 when no samples arrived
-    b.lastY = y;
+    let y;
+    if (b.count === 0) {
+      y = b.lastEmitted; // no samples this bucket: carry forward last known value
+    } else if (b.mode === 'avg') {
+      y = b.acc / b.count;
+    } else if (b.mode === 'sum') {
+      y = b.acc;
+    } else { // 'last': b.acc holds the most-recent value seen this bucket
+      y = b.acc;
+    }
+    b.lastEmitted = y;
     pts.push({ x: b.bucketEnd - BUCKET_MS, y }); // x = bucket start timestamp
     b.bucketEnd += BUCKET_MS;
     b.acc   = 0;
@@ -644,7 +769,11 @@ function feedBuckets(b, ts, value) {
   }
 
   // Accumulate into the current (open) bucket
-  b.acc += value;
+  if (b.mode === 'last') {
+    b.acc = value; // overwrite — keep only the most recent sample
+  } else {
+    b.acc += value;
+  }
   b.count++;
   return pts;
 }
@@ -663,7 +792,7 @@ function pushBucketed(chart, dsIdx, b, ts, value) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MCU panel
+//  MCU panel (by device)
 // ═══════════════════════════════════════════════════════════════
 
 function createMcuPanel(name) {
@@ -679,12 +808,12 @@ function createMcuPanel(name) {
     <div class="stats-row" id="mcu-stats-${id}"></div>
 
     <div class="chart-block">
-      <div class="chart-label">Communication Errors (Δ per 10 s bucket)</div>
+      <div class="chart-label">Communication Errors (cumulative)</div>
       <div class="chart-wrap"><canvas id="mcu-err-${id}"></canvas></div>
     </div>
 
     <div class="chart-block">
-      <div class="chart-label">Communication Traffic (Δ bytes per 10 s bucket)</div>
+      <div class="chart-label">Communication Traffic (cumulative bytes)</div>
       <div class="chart-wrap"><canvas id="mcu-traffic-${id}"></canvas></div>
     </div>
 
@@ -695,13 +824,13 @@ function createMcuPanel(name) {
   `;
   document.getElementById('mcu-panels').appendChild(el);
 
-  // Error chart: retransmit bytes / invalid bytes / retransmit_seq deltas
+  // Error chart: cumulative retransmit bytes / invalid bytes / retransmit_seq
   const errChart = makeChart(
     document.getElementById(`mcu-err-${id}`).getContext('2d'),
     [
-      ds('bytes_retransmit Δ', COLORS.retransmit),
-      ds('bytes_invalid Δ',    COLORS.invalid),
-      ds('retransmit_seq Δ',   COLORS.retransmit_seq, true),
+      ds('bytes_retransmit', COLORS.retransmit),
+      ds('bytes_invalid',    COLORS.invalid),
+      ds('retransmit_seq',   COLORS.retransmit_seq, true),
     ],
     {
       x: BASE_SCALE_X,
@@ -709,12 +838,12 @@ function createMcuPanel(name) {
     },
   );
 
-  // Traffic chart: bytes written / read deltas
+  // Traffic chart: cumulative bytes written / read
   const trafficChart = makeChart(
     document.getElementById(`mcu-traffic-${id}`).getContext('2d'),
     [
-      ds('bytes_write Δ', COLORS.write),
-      ds('bytes_read Δ',  COLORS.read),
+      ds('bytes_write', COLORS.write),
+      ds('bytes_read',  COLORS.read),
     ],
     {
       x: BASE_SCALE_X,
@@ -749,14 +878,13 @@ function createMcuPanel(name) {
 
   mcuState[name] = {
     errChart, trafficChart, perfChart,
-    prev   : null,
     statsEl: document.getElementById(`mcu-stats-${id}`),
-    // Bucket accumulators — one per chart series (delta counters → sum, levels → avg)
-    bRetransmit    : makeBuckets('sum'),
-    bInvalid       : makeBuckets('sum'),
-    bRetransmitSeq : makeBuckets('sum'),
-    bWrite         : makeBuckets('sum'),
-    bRead          : makeBuckets('sum'),
+    // Bucket accumulators — 'last' for cumulative counters, 'avg' for levels
+    bRetransmit    : makeBuckets('last'),
+    bInvalid       : makeBuckets('last'),
+    bRetransmitSeq : makeBuckets('last'),
+    bWrite         : makeBuckets('last'),
+    bRead          : makeBuckets('last'),
     bAwake         : makeBuckets('avg'),
     bTaskAvg       : makeBuckets('avg'),
     bTaskStddev    : makeBuckets('avg'),
@@ -765,8 +893,6 @@ function createMcuPanel(name) {
 
 function onMcuData(name, stats, ts) {
   const s = mcuState[name];
-  const prev = s.prev;
-  s.prev = { ...stats };
 
   // ── Stat badges ───────────────────────────────────────────
   const br  = stats.bytes_retransmit ?? 0;
@@ -784,36 +910,44 @@ function onMcuData(name, stats, ts) {
     sb('srtt',             srtt) +
     sb('rto',              rto);
 
-  if (!prev) return; // first update — no delta yet
-
-  const Δ = (k) => {
-    const v = (stats[k] ?? 0) - (prev[k] ?? 0);
-    return v < 0 ? 0 : v; // guard against counter reset
-  };
-
-  // Error chart — sum deltas into 10 s buckets
+  // ── Per-device charts — raw cumulative values ─────────────
   let dirty = false;
-  dirty |= pushBucketed(s.errChart,     0, s.bRetransmit,    ts, Δ('bytes_retransmit'));
-  dirty |= pushBucketed(s.errChart,     1, s.bInvalid,       ts, Δ('bytes_invalid'));
-  dirty |= pushBucketed(s.errChart,     2, s.bRetransmitSeq, ts, Δ('retransmit_seq'));
+
+  // Error chart
+  dirty |= pushBucketed(s.errChart,     0, s.bRetransmit,    ts, stats.bytes_retransmit ?? 0);
+  dirty |= pushBucketed(s.errChart,     1, s.bInvalid,       ts, stats.bytes_invalid    ?? 0);
+  dirty |= pushBucketed(s.errChart,     2, s.bRetransmitSeq, ts, stats.retransmit_seq   ?? 0);
   if (dirty) s.errChart.update('none');
 
-  // Traffic chart — sum deltas into 10 s buckets
+  // Traffic chart
   dirty = false;
-  dirty |= pushBucketed(s.trafficChart, 0, s.bWrite, ts, Δ('bytes_write'));
-  dirty |= pushBucketed(s.trafficChart, 1, s.bRead,  ts, Δ('bytes_read'));
+  dirty |= pushBucketed(s.trafficChart, 0, s.bWrite, ts, stats.bytes_write ?? 0);
+  dirty |= pushBucketed(s.trafficChart, 1, s.bRead,  ts, stats.bytes_read  ?? 0);
   if (dirty) s.trafficChart.update('none');
 
-  // Performance chart — average levels over 10 s buckets
+  // Performance chart
   dirty = false;
   dirty |= pushBucketed(s.perfChart, 0, s.bAwake,      ts, (stats.mcu_awake       ?? 0) * 100);
   dirty |= pushBucketed(s.perfChart, 1, s.bTaskAvg,    ts, (stats.mcu_task_avg    ?? 0) * 1e6);
   dirty |= pushBucketed(s.perfChart, 2, s.bTaskStddev, ts, (stats.mcu_task_stddev ?? 0) * 1e6);
   if (dirty) s.perfChart.update('none');
+
+  // ── Stat-grouped charts ───────────────────────────────────
+  for (const def of MCU_STAT_DEFS) {
+    const sc = mcuStatCharts[def.key];
+    if (!sc) continue;
+    const dsIdx = sc.dsIdx[name];
+    if (dsIdx === undefined) continue;
+    const raw = stats[def.key] ?? 0;
+    const val = def.scale ? def.scale(raw) : raw;
+    if (pushBucketed(sc.chart, dsIdx, sc.buckets[name], ts, val)) {
+      sc.chart.update('none');
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  CAN bus panel
+//  CAN bus panel (by device)
 // ═══════════════════════════════════════════════════════════════
 
 function createCanbusPanel(name) {
@@ -830,7 +964,7 @@ function createCanbusPanel(name) {
     <div class="stats-row" id="can-stats-${id}"></div>
 
     <div class="chart-block">
-      <div class="chart-label">Errors &amp; Retries (Δ per 10 s bucket)</div>
+      <div class="chart-label">Errors &amp; Retries (cumulative)</div>
       <div class="chart-wrap"><canvas id="can-chart-${id}"></canvas></div>
     </div>
   `;
@@ -839,9 +973,9 @@ function createCanbusPanel(name) {
   const chart = makeChart(
     document.getElementById(`can-chart-${id}`).getContext('2d'),
     [
-      ds('rx_error Δ',   COLORS.rx_err),
-      ds('tx_error Δ',   COLORS.tx_err),
-      ds('tx_retries Δ', COLORS.tx_retry, true),
+      ds('rx_error',   COLORS.rx_err),
+      ds('tx_error',   COLORS.tx_err),
+      ds('tx_retries', COLORS.tx_retry, true),
     ],
     {
       x: BASE_SCALE_X,
@@ -851,13 +985,12 @@ function createCanbusPanel(name) {
 
   canbusState[name] = {
     chart,
-    prev   : null,
     statsEl: document.getElementById(`can-stats-${id}`),
     stateEl: document.getElementById(`can-state-${id}`),
-    // Bucket accumulators — sum error/retry deltas over 10 s
-    bRxErr  : makeBuckets('sum'),
-    bTxErr  : makeBuckets('sum'),
-    bTxRetry: makeBuckets('sum'),
+    // Bucket accumulators — 'last' for cumulative counters
+    bRxErr  : makeBuckets('last'),
+    bTxErr  : makeBuckets('last'),
+    bTxRetry: makeBuckets('last'),
   };
 }
 
@@ -879,19 +1012,107 @@ function onCanbusData(name, data, ts) {
     sb('tx_error',   txe, txe > 0 ? 'warn' : 'ok') +
     sb('tx_retries', txr, txr > 0 ? 'warn' : 'ok');
 
-  const prev = s.prev;
-  s.prev = { rx_error: rxe, tx_error: txe, tx_retries: txr };
-
-  if (!prev) return;
-
-  const Δ = (cur, p) => { const v = cur - p; return v < 0 ? 0 : v; };
-
-  // Sum error/retry deltas into 10 s buckets
+  // ── Per-device chart — raw cumulative values ──────────────
   let dirty = false;
-  dirty |= pushBucketed(s.chart, 0, s.bRxErr,   ts, Δ(rxe, prev.rx_error));
-  dirty |= pushBucketed(s.chart, 1, s.bTxErr,   ts, Δ(txe, prev.tx_error));
-  dirty |= pushBucketed(s.chart, 2, s.bTxRetry, ts, Δ(txr, prev.tx_retries));
+  dirty |= pushBucketed(s.chart, 0, s.bRxErr,   ts, rxe);
+  dirty |= pushBucketed(s.chart, 1, s.bTxErr,   ts, txe);
+  dirty |= pushBucketed(s.chart, 2, s.bTxRetry, ts, txr);
   if (dirty) s.chart.update('none');
+
+  // ── Stat-grouped charts ───────────────────────────────────
+  for (const def of CANBUS_STAT_DEFS) {
+    const sc = canbusStatCharts[def.key];
+    if (!sc) continue;
+    const dsIdx = sc.dsIdx[name];
+    if (dsIdx === undefined) continue;
+    const raw = data[def.key] ?? 0;
+    const val = def.scale ? def.scale(raw) : raw;
+    if (pushBucketed(sc.chart, dsIdx, sc.buckets[name], ts, val)) {
+      sc.chart.update('none');
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Stat-grouped panels ("By Stat" view)
+// ═══════════════════════════════════════════════════════════════
+
+function createMcuStatCharts(mcuObjs) {
+  for (const def of MCU_STAT_DEFS) {
+    const panelEl = document.createElement('div');
+    panelEl.className = 'panel';
+    panelEl.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">📊 ${def.label}</div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-wrap"><canvas id="mcu-stat-chart-${def.key}"></canvas></div>
+      </div>
+    `;
+    document.getElementById('mcu-stat-panels').appendChild(panelEl);
+
+    const datasets = mcuObjs.map((name, i) => {
+      const label = name === 'mcu' ? 'Main MCU' : name.replace('mcu ', '');
+      return ds(label, DEVICE_PALETTE[i % DEVICE_PALETTE.length]);
+    });
+
+    const chart = makeChart(
+      document.getElementById(`mcu-stat-chart-${def.key}`).getContext('2d'),
+      datasets,
+      {
+        x: BASE_SCALE_X,
+        y: { ...BASE_SCALE_Y, title: { display: true, text: def.yLabel, color: '#a0a0b0', font: { size: 10 } } },
+      },
+    );
+
+    const buckets = {};
+    const dsIdx   = {};
+    mcuObjs.forEach((name, i) => {
+      buckets[name] = makeBuckets(def.mode);
+      dsIdx[name]   = i;
+    });
+
+    mcuStatCharts[def.key] = { chart, buckets, dsIdx, def };
+  }
+}
+
+function createCanbusStatCharts(canbusObjs) {
+  for (const def of CANBUS_STAT_DEFS) {
+    const panelEl = document.createElement('div');
+    panelEl.className = 'panel';
+    panelEl.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">📊 ${def.label}</div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-wrap"><canvas id="can-stat-chart-${def.key}"></canvas></div>
+      </div>
+    `;
+    document.getElementById('canbus-stat-panels').appendChild(panelEl);
+
+    const datasets = canbusObjs.map((name, i) => {
+      const label = name.replace('canbus_stats ', '');
+      return ds(label, DEVICE_PALETTE[i % DEVICE_PALETTE.length]);
+    });
+
+    const chart = makeChart(
+      document.getElementById(`can-stat-chart-${def.key}`).getContext('2d'),
+      datasets,
+      {
+        x: BASE_SCALE_X,
+        y: { ...BASE_SCALE_Y, title: { display: true, text: def.yLabel, color: '#a0a0b0', font: { size: 10 } } },
+      },
+    );
+
+    const buckets = {};
+    const dsIdx   = {};
+    canbusObjs.forEach((name, i) => {
+      buckets[name] = makeBuckets(def.mode);
+      dsIdx[name]   = i;
+    });
+
+    canbusStatCharts[def.key] = { chart, buckets, dsIdx, def };
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
