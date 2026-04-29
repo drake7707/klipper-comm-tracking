@@ -575,6 +575,7 @@ function clearChartData() {
     s.bAwake         = makeBuckets('avg');
     s.bTaskAvg       = makeBuckets('avg');
     s.bTaskStddev    = makeBuckets('avg');
+    s.last = {};
   }
   // Per-device canbus charts
   for (const s of Object.values(canbusState)) {
@@ -583,6 +584,7 @@ function clearChartData() {
     s.bRxErr   = makeBuckets('last');
     s.bTxErr   = makeBuckets('last');
     s.bTxRetry = makeBuckets('last');
+    s.last = {};
   }
   // Stat-grouped MCU charts
   for (const sc of Object.values(mcuStatCharts)) {
@@ -880,6 +882,7 @@ function createMcuPanel(name) {
   mcuState[name] = {
     errChart, trafficChart, perfChart,
     statsEl: document.getElementById(`mcu-stats-${id}`),
+    last   : {},  // last-known values — only updated when a field is present in an update
     // Bucket accumulators — 'last' for cumulative counters, 'avg' for levels
     bRetransmit    : makeBuckets('last'),
     bInvalid       : makeBuckets('last'),
@@ -895,52 +898,59 @@ function createMcuPanel(name) {
 function onMcuData(name, stats, ts) {
   const s = mcuState[name];
 
+  // Merge only the fields that are actually present in this (possibly partial) update.
+  // Fields omitted by Moonraker haven't changed — we keep the previous known value.
+  for (const [k, v] of Object.entries(stats)) {
+    if (v !== undefined && v !== null) s.last[k] = v;
+  }
+  const L = s.last; // convenience alias
+
   // ── Stat badges ───────────────────────────────────────────
-  const br  = stats.bytes_retransmit ?? 0;
-  const bi  = stats.bytes_invalid    ?? 0;
-  const srtt = stats.srtt != null ? (stats.srtt * 1000).toFixed(3) + ' ms' : '—';
-  const rto  = stats.rto  != null ? (stats.rto  * 1000).toFixed(1) + ' ms' : '—';
+  const br  = L.bytes_retransmit ?? 0;
+  const bi  = L.bytes_invalid    ?? 0;
+  const srtt = L.srtt != null ? (L.srtt * 1000).toFixed(3) + ' ms' : '—';
+  const rto  = L.rto  != null ? (L.rto  * 1000).toFixed(1) + ' ms' : '—';
 
   s.statsEl.innerHTML =
-    sb('bytes_write',      fmtBytes(stats.bytes_write ?? 0)) +
-    sb('bytes_read',       fmtBytes(stats.bytes_read  ?? 0)) +
+    sb('bytes_write',      fmtBytes(L.bytes_write ?? 0)) +
+    sb('bytes_read',       fmtBytes(L.bytes_read  ?? 0)) +
     sb('bytes_retransmit', br,  br  > 0 ? 'warn' : 'ok') +
     sb('bytes_invalid',    bi,  bi  > 0 ? 'err'  : 'ok') +
-    sb('send_seq',         stats.send_seq    ?? '—') +
-    sb('receive_seq',      stats.receive_seq ?? '—') +
+    sb('send_seq',         L.send_seq    ?? '—') +
+    sb('receive_seq',      L.receive_seq ?? '—') +
     sb('srtt',             srtt) +
     sb('rto',              rto);
 
-  // ── Per-device charts — raw cumulative values ─────────────
+  // ── Per-device charts — only feed when the field arrived in this update ───
   let dirty = false;
 
   // Error chart
-  dirty |= pushBucketed(s.errChart,     0, s.bRetransmit,    ts, stats.bytes_retransmit ?? 0);
-  dirty |= pushBucketed(s.errChart,     1, s.bInvalid,       ts, stats.bytes_invalid    ?? 0);
-  dirty |= pushBucketed(s.errChart,     2, s.bRetransmitSeq, ts, stats.retransmit_seq   ?? 0);
+  if (stats.bytes_retransmit !== undefined) dirty |= pushBucketed(s.errChart, 0, s.bRetransmit,    ts, L.bytes_retransmit);
+  if (stats.bytes_invalid    !== undefined) dirty |= pushBucketed(s.errChart, 1, s.bInvalid,       ts, L.bytes_invalid);
+  if (stats.retransmit_seq   !== undefined) dirty |= pushBucketed(s.errChart, 2, s.bRetransmitSeq, ts, L.retransmit_seq);
   if (dirty) s.errChart.update('none');
 
   // Traffic chart
   dirty = false;
-  dirty |= pushBucketed(s.trafficChart, 0, s.bWrite, ts, stats.bytes_write ?? 0);
-  dirty |= pushBucketed(s.trafficChart, 1, s.bRead,  ts, stats.bytes_read  ?? 0);
+  if (stats.bytes_write !== undefined) dirty |= pushBucketed(s.trafficChart, 0, s.bWrite, ts, L.bytes_write);
+  if (stats.bytes_read  !== undefined) dirty |= pushBucketed(s.trafficChart, 1, s.bRead,  ts, L.bytes_read);
   if (dirty) s.trafficChart.update('none');
 
   // Performance chart
   dirty = false;
-  dirty |= pushBucketed(s.perfChart, 0, s.bAwake,      ts, (stats.mcu_awake       ?? 0) * 100);
-  dirty |= pushBucketed(s.perfChart, 1, s.bTaskAvg,    ts, (stats.mcu_task_avg    ?? 0) * 1e6);
-  dirty |= pushBucketed(s.perfChart, 2, s.bTaskStddev, ts, (stats.mcu_task_stddev ?? 0) * 1e6);
+  if (stats.mcu_awake       !== undefined) dirty |= pushBucketed(s.perfChart, 0, s.bAwake,      ts, L.mcu_awake       * 100);
+  if (stats.mcu_task_avg    !== undefined) dirty |= pushBucketed(s.perfChart, 1, s.bTaskAvg,    ts, L.mcu_task_avg    * 1e6);
+  if (stats.mcu_task_stddev !== undefined) dirty |= pushBucketed(s.perfChart, 2, s.bTaskStddev, ts, L.mcu_task_stddev * 1e6);
   if (dirty) s.perfChart.update('none');
 
   // ── Stat-grouped charts ───────────────────────────────────
   for (const def of MCU_STAT_DEFS) {
+    if (stats[def.key] === undefined) continue; // field absent in this update — skip
     const sc = mcuStatCharts[def.key];
     if (!sc) continue;
     const dsIdx = sc.dsIdx[name];
     if (dsIdx === undefined) continue;
-    const raw = stats[def.key] ?? 0;
-    const val = def.scale ? def.scale(raw) : raw;
+    const val = def.scale ? def.scale(L[def.key]) : L[def.key];
     if (pushBucketed(sc.chart, dsIdx, sc.buckets[name], ts, val)) {
       sc.chart.update('none');
     }
@@ -988,6 +998,7 @@ function createCanbusPanel(name) {
     chart,
     statsEl: document.getElementById(`can-stats-${id}`),
     stateEl: document.getElementById(`can-state-${id}`),
+    last   : {},  // last-known values — only updated when a field is present in an update
     // Bucket accumulators — 'last' for cumulative counters
     bRxErr  : makeBuckets('last'),
     bTxErr  : makeBuckets('last'),
@@ -998,36 +1009,44 @@ function createCanbusPanel(name) {
 function onCanbusData(name, data, ts) {
   const s = canbusState[name];
 
+  // Merge only the fields that are actually present in this (possibly partial) update.
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== undefined && v !== null) s.last[k] = v;
+  }
+  const L = s.last;
+
   // ── Bus state badge ───────────────────────────────────────
-  const state = (data.bus_state ?? 'unknown').replace(/\s+/g, '_').toLowerCase();
-  s.stateEl.textContent = data.bus_state ?? 'unknown';
-  s.stateEl.className   = `bus-state ${state}`;
+  if (data.bus_state !== undefined) {
+    const state = L.bus_state.replace(/\s+/g, '_').toLowerCase();
+    s.stateEl.textContent = L.bus_state;
+    s.stateEl.className   = `bus-state ${state}`;
+  }
 
   // ── Stat badges ───────────────────────────────────────────
-  const rxe = data.rx_error   ?? 0;
-  const txe = data.tx_error   ?? 0;
-  const txr = data.tx_retries ?? 0;
+  const rxe = L.rx_error   ?? 0;
+  const txe = L.tx_error   ?? 0;
+  const txr = L.tx_retries ?? 0;
 
   s.statsEl.innerHTML =
     sb('rx_error',   rxe, rxe > 0 ? 'warn' : 'ok') +
     sb('tx_error',   txe, txe > 0 ? 'warn' : 'ok') +
     sb('tx_retries', txr, txr > 0 ? 'warn' : 'ok');
 
-  // ── Per-device chart — raw cumulative values ──────────────
+  // ── Per-device chart — only feed when the field arrived in this update ────
   let dirty = false;
-  dirty |= pushBucketed(s.chart, 0, s.bRxErr,   ts, rxe);
-  dirty |= pushBucketed(s.chart, 1, s.bTxErr,   ts, txe);
-  dirty |= pushBucketed(s.chart, 2, s.bTxRetry, ts, txr);
+  if (data.rx_error   !== undefined) dirty |= pushBucketed(s.chart, 0, s.bRxErr,   ts, L.rx_error);
+  if (data.tx_error   !== undefined) dirty |= pushBucketed(s.chart, 1, s.bTxErr,   ts, L.tx_error);
+  if (data.tx_retries !== undefined) dirty |= pushBucketed(s.chart, 2, s.bTxRetry, ts, L.tx_retries);
   if (dirty) s.chart.update('none');
 
   // ── Stat-grouped charts ───────────────────────────────────
   for (const def of CANBUS_STAT_DEFS) {
+    if (data[def.key] === undefined) continue; // field absent in this update — skip
     const sc = canbusStatCharts[def.key];
     if (!sc) continue;
     const dsIdx = sc.dsIdx[name];
     if (dsIdx === undefined) continue;
-    const raw = data[def.key] ?? 0;
-    const val = def.scale ? def.scale(raw) : raw;
+    const val = def.scale ? def.scale(L[def.key]) : L[def.key];
     if (pushBucketed(sc.chart, dsIdx, sc.buckets[name], ts, val)) {
       sc.chart.update('none');
     }
