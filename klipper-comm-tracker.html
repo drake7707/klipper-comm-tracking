@@ -261,7 +261,7 @@
   <h1>🖨️ Klipper Comm Tracker</h1>
   <span class="history-info">10 s buckets · up to 12 h history</span>
   <div class="conn-form">
-    <input type="text" id="host-input" placeholder="Moonraker host  (e.g. 192.168.1.100)" />
+    <input type="text" id="host-input" placeholder="Moonraker host (e.g. 192.168.1.100)" />
     <button id="connect-btn"    onclick="connect()">Connect</button>
     <button id="disconnect-btn" onclick="disconnect()">Disconnect</button>
     <button id="clear-btn"      onclick="clearChartData()" style="display:none">Clear Data</button>
@@ -303,8 +303,10 @@
 // Bucket-based aggregation: values within each BUCKET_MS window are
 // summed (for deltas) or averaged (for levels) before being stored.
 // This keeps chart point counts manageable while retaining long history.
-const BUCKET_MS  = 10_000;   // 10-second aggregation buckets
-const MAX_BUCKETS = 4320;    // 12 hours  (4320 × 10 s = 43 200 s)
+const BUCKET_MS   = 10_000;                       // 10-second aggregation buckets
+const MAX_BUCKETS = (12 * 60 * 60) / (BUCKET_MS / 1000); // 12 h ÷ 10 s = 4 320 buckets
+const RPC_TIMEOUT_MS = 12_000;                    // JSON-RPC call timeout
+const MAX_LOG_LINES  = 120;                       // max lines kept in the log panel
 
 const COLORS = {
   retransmit : '#f28c28',
@@ -338,7 +340,7 @@ function log(msg, cls = '') {
   });
   el.appendChild(line);
   el.scrollTop = el.scrollHeight;
-  if (el.children.length > 120) el.children[0].remove();
+  if (el.children.length > MAX_LOG_LINES) el.children[0].remove();
 }
 
 // ── Connection helpers ────────────────────────────────────────
@@ -371,7 +373,7 @@ function sendRpc(method, params) {
     ws.send(JSON.stringify(msg));
     setTimeout(() => {
       if (pending[id]) { delete pending[id]; reject(new Error('RPC timeout')); }
-    }, 12000);
+    }, RPC_TIMEOUT_MS);
   });
 }
 
