@@ -437,6 +437,11 @@ function wsUrl(host) {
   return `${proto}//${host}/websocket`;
 }
 
+function httpUrl(host) {
+  const proto = window.location.protocol === 'https:' ? 'https:' : 'http:';
+  return `${proto}//${host}`;
+}
+
 function setStatus(s) {
   const el = document.getElementById('conn-status');
   el.className = `status ${s}`;
@@ -677,23 +682,26 @@ async function initialise() {
     const subRes = await sendRpc('printer.objects.subscribe', { objects: subObjects });
     log('Subscribed to object updates.', 'ok');
 
-    // Do an explicit query to get a guaranteed full snapshot of all fields,
-    // even those that Moonraker omits from updates when their value hasn't changed.
-    // We process this before (or alongside) the subscribe response so that s.last
-    // is pre-populated with real values rather than waiting for the first change.
-    try {
-      const queryRes = await sendRpc('printer.objects.query', { objects: subObjects });
-      if (queryRes && queryRes.status) {
-        handleUpdate(queryRes.status);
-      }
-    } catch (qe) {
-      log(`Initial query failed (non-fatal): ${qe.message}`, 'warn');
-    }
-
-    // Also process the status snapshot from the subscribe response itself
-    // (it may contain fields not returned by query in some edge cases).
+    // Process the status snapshot from the subscribe response immediately so
+    // charts have baseline values before the first live update arrives.
     if (subRes && subRes.status) {
       handleUpdate(subRes.status);
+    }
+
+    // Fetch a full snapshot via HTTP to pre-populate fields that Moonraker omits
+    // from subscribe/notify when their value almost never changes.
+    // Uses GET /printer/objects/query?obj1&obj2%20name&... (bare key per object).
+    try {
+      const qs  = Object.keys(subObjects).map(k => encodeURIComponent(k)).join('&');
+      const url = `${httpUrl(currentHost)}/printer/objects/query?${qs}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      if (json && json.result && json.result.status) {
+        handleUpdate(json.result.status);
+      }
+    } catch (qe) {
+      log(`Initial HTTP query failed (non-fatal): ${qe.message}`, 'warn');
     }
   } catch (e) {
     log(`Init error: ${e.message}`, 'err');
