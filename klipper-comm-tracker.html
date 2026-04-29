@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Klipper Comm Tracker</title>
+
+  <!-- Chart.js 4.x + date-fns adapter for time-series X axis -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+  <style>
+    /* ── Design tokens ────────────────────────────────────── */
+    :root {
+      --bg:      #0f0f1a;
+      --bg2:     #1a1a2e;
+      --bg3:     #16213e;
+      --border:  #2a2a4a;
+      --text:    #e0e0e0;
+      --muted:   #a0a0b0;
+      --green:   #00d4aa;
+      --blue:    #4d9de0;
+      --orange:  #f28c28;
+      --red:     #e74c3c;
+      --yellow:  #f1c40f;
+      --purple:  #9b59b6;
+    }
+
+    /* ── Reset ────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ───────────────────────────────────────────── */
+    header {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    header h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--green);
+      white-space: nowrap;
+    }
+
+    .conn-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+
+    .conn-form input[type="text"] {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 12px;
+      color: var(--text);
+      font-size: 0.85rem;
+      width: 230px;
+      outline: none;
+    }
+    .conn-form input[type="text"]:focus {
+      border-color: var(--blue);
+    }
+
+    button {
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      padding: 6px 14px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: var(--text);
+      transition: filter 0.15s;
+    }
+    button:hover { filter: brightness(1.25); }
+    #connect-btn    { background: #0f3460; }
+    #disconnect-btn { background: #6e1515; display: none; }
+
+    /* ── Status badge ─────────────────────────────────────── */
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .status::before {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .status.connected    { color: var(--green);  background: rgba(0,212,170,.12); }
+    .status.disconnected { color: var(--red);    background: rgba(231,76,60,.12); }
+    .status.connecting   { color: var(--yellow); background: rgba(241,196,15,.12); }
+
+    /* ── Main layout ──────────────────────────────────────── */
+    main { padding: 22px; max-width: 1700px; margin: 0 auto; }
+
+    section { margin-bottom: 30px; }
+
+    section > h2 {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .panels-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(580px, 1fr));
+      gap: 18px;
+    }
+
+    /* ── Panel card ───────────────────────────────────────── */
+    .panel {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .panel-title {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    /* ── Stat badges row ──────────────────────────────────── */
+    .stats-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .sb {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 9px;
+      font-size: 0.73rem;
+      line-height: 1.6;
+    }
+    .sb .lbl { color: var(--muted); margin-right: 3px; }
+    .sb .val { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .sb.ok   .val { color: var(--green); }
+    .sb.warn .val { color: var(--orange); }
+    .sb.err  .val { color: var(--red); }
+
+    /* ── Chart blocks ─────────────────────────────────────── */
+    .chart-block { margin-bottom: 14px; }
+    .chart-block:last-child { margin-bottom: 0; }
+
+    .chart-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 5px;
+    }
+
+    .chart-wrap {
+      position: relative;
+      height: 185px;
+    }
+
+    /* ── Bus state badge ──────────────────────────────────── */
+    .bus-state {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 0.73rem;
+      font-weight: 600;
+    }
+    .bus-state.active       { background: rgba(0,212,170,.18); color: var(--green); }
+    .bus-state.passive      { background: rgba(241,196,15,.18); color: var(--yellow); }
+    .bus-state.warn_passive { background: rgba(241,196,15,.18); color: var(--yellow); }
+    .bus-state.off          { background: rgba(231,76,60,.18);  color: var(--red); }
+    .bus-state.unknown      { background: rgba(160,160,176,.15); color: var(--muted); }
+
+    /* ── Empty / log panels ───────────────────────────────── */
+    #empty {
+      text-align: center;
+      padding: 70px 24px;
+      color: var(--muted);
+    }
+    #empty svg { opacity: .4; }
+    #empty p { margin-top: 10px; font-size: 0.875rem; }
+
+    #log {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--muted);
+      max-height: 110px;
+      overflow-y: auto;
+      margin-top: 4px;
+      display: none;
+    }
+    .log-line         { margin-bottom: 1px; }
+    .log-line.err     { color: var(--red); }
+    .log-line.ok      { color: var(--green); }
+    .log-line.info    { color: var(--blue); }
+
+    /* ── History info pill ────────────────────────────────────── */
+    .history-info {
+      font-size: 0.7rem;
+      font-weight: 500;
+      color: var(--muted);
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 10px;
+      white-space: nowrap;
+    }
+
+    #clear-btn { background: #2a1a00; }
+    #clear-btn:hover { background: #4a3000; }
+  </style>
+</head>
+
+<body>
+
+<!-- ═══════════════════════ HEADER ══════════════════════════ -->
+<header>
+  <h1>🖨️ Klipper Comm Tracker</h1>
+  <span class="history-info">10 s buckets · up to 12 h history</span>
+  <div class="conn-form">
+    <input type="text" id="host-input" placeholder="Moonraker host  (e.g. 192.168.1.100)" />
+    <button id="connect-btn"    onclick="connect()">Connect</button>
+    <button id="disconnect-btn" onclick="disconnect()">Disconnect</button>
+    <button id="clear-btn"      onclick="clearChartData()" style="display:none">Clear Data</button>
+    <span class="status disconnected" id="conn-status">Disconnected</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════ MAIN ═════════════════════════════ -->
+<main>
+
+  <div id="empty">
+    <svg width="60" height="60" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.5">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <path d="M8 21h8M12 17v4M7 8h10M7 11h7"/>
+    </svg>
+    <p>Enter the Moonraker host and click <strong>Connect</strong> to start tracking.</p>
+  </div>
+
+  <section id="mcu-section" style="display:none">
+    <h2>MCU Statistics</h2>
+    <div class="panels-grid" id="mcu-panels"></div>
+  </section>
+
+  <section id="canbus-section" style="display:none">
+    <h2>CAN Bus Statistics</h2>
+    <div class="panels-grid" id="canbus-panels"></div>
+  </section>
+
+  <div id="log"></div>
+
+</main>
+
+<!-- ═══════════════════════ SCRIPT ═══════════════════════════ -->
+<script>
+'use strict';
+
+// ── Constants ────────────────────────────────────────────────
+// Bucket-based aggregation: values within each BUCKET_MS window are
+// summed (for deltas) or averaged (for levels) before being stored.
+// This keeps chart point counts manageable while retaining long history.
+const BUCKET_MS  = 10_000;   // 10-second aggregation buckets
+const MAX_BUCKETS = 4320;    // 12 hours  (4320 × 10 s = 43 200 s)
+
+const COLORS = {
+  retransmit : '#f28c28',
+  invalid    : '#e74c3c',
+  retransmit_seq: '#f1c40f',
+  write      : '#4d9de0',
+  read       : '#00d4aa',
+  awake      : '#9b59b6',
+  task_avg   : '#3498db',
+  task_stddev: '#2980b9',
+  rx_err     : '#e74c3c',
+  tx_err     : '#f28c28',
+  tx_retry   : '#f1c40f',
+};
+
+// ── State ────────────────────────────────────────────────────
+let ws          = null;
+let msgId       = 1;
+let currentHost = null;     // host we last successfully initialised against
+const pending     = {};     // id → {resolve, reject}
+const mcuState    = {};     // name → {errChart, trafficChart, perfChart, prev, statsEl, b*}
+const canbusState = {};     // name → {chart, prev, statsEl, stateEl, b*}
+
+// ── Logging ──────────────────────────────────────────────────
+function log(msg, cls = '') {
+  const el = document.getElementById('log');
+  el.style.display = '';
+  const line = Object.assign(document.createElement('div'), {
+    className : 'log-line' + (cls ? ' ' + cls : ''),
+    textContent: `[${new Date().toLocaleTimeString()}]  ${msg}`,
+  });
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  if (el.children.length > 120) el.children[0].remove();
+}
+
+// ── Connection helpers ────────────────────────────────────────
+function guessHost() {
+  const h = window.location.hostname;
+  if (!h || h === 'localhost' || h === '127.0.0.1') return '';
+  const p = window.location.port;
+  return h + (p && p !== '80' && p !== '443' ? ':' + p : '');
+}
+
+function wsUrl(host) {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${host}/websocket`;
+}
+
+function setStatus(s) {
+  const el = document.getElementById('conn-status');
+  el.className = `status ${s}`;
+  el.textContent = s === 'connected' ? 'Connected'
+                 : s === 'connecting' ? 'Connecting…'
+                 : 'Disconnected';
+}
+
+function sendRpc(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = msgId++;
+    pending[id] = { resolve, reject };
+    const msg = { jsonrpc: '2.0', method, id };
+    if (params !== undefined) msg.params = params;
+    ws.send(JSON.stringify(msg));
+    setTimeout(() => {
+      if (pending[id]) { delete pending[id]; reject(new Error('RPC timeout')); }
+    }, 12000);
+  });
+}
+
+// ── connect / disconnect ──────────────────────────────────────
+function connect() {
+  const input = document.getElementById('host-input');
+  const host  = (input.value.trim() || guessHost());
+  if (!host) { alert('Please enter the Moonraker host address.'); return; }
+  input.value = host;
+
+  // Switching to a different printer: discard old panels and history
+  if (currentHost !== null && host !== currentHost) {
+    clearPanels();
+  }
+
+  setStatus('connecting');
+  document.getElementById('connect-btn').style.display    = 'none';
+  document.getElementById('disconnect-btn').style.display = '';
+  document.getElementById('clear-btn').style.display      = '';
+  document.getElementById('empty').style.display          = 'none';
+
+  log(`Connecting to ${wsUrl(host)} …`);
+
+  ws = new WebSocket(wsUrl(host));
+
+  ws.onopen = () => {
+    currentHost = host;
+    setStatus('connected');
+    log('WebSocket connected.', 'ok');
+    initialise();
+  };
+
+  ws.onclose = (e) => {
+    setStatus('disconnected');
+    log(`Disconnected${e.reason ? ': ' + e.reason : '.'}`, 'err');
+    document.getElementById('connect-btn').style.display    = '';
+    document.getElementById('disconnect-btn').style.display = 'none';
+    // Intentionally leave clear-btn visible so the user can still clear the
+    // retained history while disconnected, and leave all chart data intact.
+  };
+
+  ws.onerror = () => log('WebSocket error.', 'err');
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    // JSON-RPC response
+    if (msg.id !== undefined && pending[msg.id]) {
+      if (msg.error) pending[msg.id].reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+      else           pending[msg.id].resolve(msg.result);
+      delete pending[msg.id];
+      return;
+    }
+
+    // Subscription notification
+    // params[0] = status dict, params[1] = eventtime
+    if (msg.method === 'notify_status_update' && Array.isArray(msg.params)) {
+      handleUpdate(msg.params[0]);
+    }
+  };
+}
+
+function disconnect() {
+  if (ws) { ws.close(); ws = null; }
+}
+
+// ── Panel lifecycle ───────────────────────────────────────────
+/**
+ * Destroy all Chart.js instances, wipe state and DOM, reset tracked host.
+ * Only called when the user explicitly clears data or switches to a new host.
+ */
+function clearPanels() {
+  for (const s of Object.values(mcuState)) {
+    s.errChart.destroy();
+    s.trafficChart.destroy();
+    s.perfChart.destroy();
+  }
+  for (const s of Object.values(canbusState)) {
+    s.chart.destroy();
+  }
+  for (const k of Object.keys(mcuState))    delete mcuState[k];
+  for (const k of Object.keys(canbusState)) delete canbusState[k];
+  document.getElementById('mcu-panels').innerHTML    = '';
+  document.getElementById('canbus-panels').innerHTML = '';
+  document.getElementById('mcu-section').style.display    = 'none';
+  document.getElementById('canbus-section').style.display = 'none';
+  currentHost = null;
+}
+
+/**
+ * Wipe only the chart series data and reset bucket accumulators,
+ * keeping panels and structure intact.  Useful mid-session.
+ */
+function clearChartData() {
+  for (const s of Object.values(mcuState)) {
+    for (const chart of [s.errChart, s.trafficChart, s.perfChart]) {
+      chart.data.datasets.forEach(d => { d.data = []; });
+      chart.update('none');
+    }
+    s.bRetransmit    = makeBuckets('sum');
+    s.bInvalid       = makeBuckets('sum');
+    s.bRetransmitSeq = makeBuckets('sum');
+    s.bWrite         = makeBuckets('sum');
+    s.bRead          = makeBuckets('sum');
+    s.bAwake         = makeBuckets('avg');
+    s.bTaskAvg       = makeBuckets('avg');
+    s.bTaskStddev    = makeBuckets('avg');
+    s.prev = null;
+  }
+  for (const s of Object.values(canbusState)) {
+    s.chart.data.datasets.forEach(d => { d.data = []; });
+    s.chart.update('none');
+    s.bRxErr   = makeBuckets('sum');
+    s.bTxErr   = makeBuckets('sum');
+    s.bTxRetry = makeBuckets('sum');
+    s.prev = null;
+  }
+  log('Chart data cleared.', 'info');
+}
+
+// ── Initialise: discover objects → create panels → subscribe ─
+async function initialise() {
+  // NOTE: do NOT call clearPanels() here — on reconnect we want to keep all
+  // accumulated chart history and simply resume feeding new data.
+  try {
+    const listRes = await sendRpc('printer.objects.list');
+    const objects = (listRes && listRes.objects) || [];
+    log(`Discovered ${objects.length} printer object(s).`);
+
+    const mcuObjs    = objects.filter(o => o === 'mcu' || o.startsWith('mcu '));
+    const canbusObjs = objects.filter(o => o.startsWith('canbus_stats'));
+
+    log(`MCUs: ${mcuObjs.join(', ') || '(none)'}`);
+    log(`CAN interfaces: ${canbusObjs.join(', ') || '(none)'}`);
+
+    if (!mcuObjs.length && !canbusObjs.length) {
+      log('No MCU or canbus_stats objects found.', 'err');
+      return;
+    }
+
+    // Only create panels for objects we haven't seen before (preserves history
+    // for objects that were already tracked before a reconnect).
+    mcuObjs.forEach(n    => { if (!mcuState[n])    createMcuPanel(n);    });
+    canbusObjs.forEach(n => { if (!canbusState[n]) createCanbusPanel(n); });
+
+    if (mcuObjs.length)    document.getElementById('mcu-section').style.display    = '';
+    if (canbusObjs.length) document.getElementById('canbus-section').style.display = '';
+
+    // Build subscription request – null means subscribe to all fields
+    const subObjects = {};
+    mcuObjs.forEach(o    => { subObjects[o] = null; });
+    canbusObjs.forEach(o => { subObjects[o] = null; });
+
+    const subRes = await sendRpc('printer.objects.subscribe', { objects: subObjects });
+    log('Subscribed to object updates.', 'ok');
+
+    // Process the initial full status snapshot included in the subscribe response
+    if (subRes && subRes.status) {
+      handleUpdate(subRes.status);
+    }
+  } catch (e) {
+    log(`Init error: ${e.message}`, 'err');
+  }
+}
+
+// ── Status update router ──────────────────────────────────────
+function handleUpdate(status) {
+  const ts = Date.now();
+  for (const [name, data] of Object.entries(status)) {
+    if (name === 'mcu' || name.startsWith('mcu ')) {
+      if (data.last_stats && mcuState[name]) onMcuData(name, data.last_stats, ts);
+    } else if (name.startsWith('canbus_stats')) {
+      if (canbusState[name]) onCanbusData(name, data, ts);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Chart helpers
+// ═══════════════════════════════════════════════════════════════
+
+const BASE_SCALE_X = {
+  type  : 'time',
+  time  : {
+    // Chart.js auto-picks the right unit; provide readable formats for each level
+    displayFormats: {
+      second     : 'HH:mm:ss',
+      minute     : 'HH:mm',
+      hour       : 'HH:mm',
+    },
+  },
+  ticks : { color: '#a0a0b0', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+  grid  : { color: '#2a2a4a' },
+};
+
+const BASE_SCALE_Y = {
+  beginAtZero: true,
+  ticks: { color: '#a0a0b0', font: { size: 10 } },
+  grid : { color: '#2a2a4a' },
+};
+
+function ds(label, color, dashed = false, yAxisID = 'y') {
+  return {
+    label, yAxisID,
+    data: [],
+    borderColor     : color,
+    backgroundColor : color + '18',
+    borderWidth     : dashed ? 1.5 : 2,
+    borderDash      : dashed ? [5, 4] : [],
+    tension         : 0.3,
+    fill            : false,
+    pointRadius     : 0,
+    pointHoverRadius: 4,
+  };
+}
+
+function makeChart(ctx, datasets, scales) {
+  return new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      animation   : false,
+      responsive  : true,
+      maintainAspectRatio: false,
+      interaction : { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#a0a0b0', font: { size: 11 }, boxWidth: 14, padding: 10 } },
+      },
+      scales,
+    },
+  });
+}
+
+// ── Bucket aggregation helpers ────────────────────────────────
+/**
+ * Create a bucket-series accumulator.
+ * @param {'sum'|'avg'} mode  – sum for delta counters, avg for level values
+ */
+function makeBuckets(mode = 'sum') {
+  return { mode, bucketEnd: 0, acc: 0, count: 0, lastY: 0 };
+}
+
+/**
+ * Feed one raw value into a bucket accumulator.
+ * Returns an array of {x, y} points for every bucket that just completed
+ * (usually [] while inside a bucket, [point] when a boundary is crossed,
+ * rarely more if the clock jumped forward by multiple bucket widths).
+ */
+function feedBuckets(b, ts, value) {
+  const pts = [];
+
+  if (b.bucketEnd === 0) {
+    // Align the first bucket end to the next BUCKET_MS boundary
+    b.bucketEnd = (Math.floor(ts / BUCKET_MS) + 1) * BUCKET_MS;
+  }
+
+  // Flush every completed bucket
+  while (ts >= b.bucketEnd) {
+    const y = (b.mode === 'avg' && b.count > 0)
+              ? b.acc / b.count
+              : b.acc;          // sum mode: 0 when no samples arrived
+    b.lastY = y;
+    pts.push({ x: b.bucketEnd - BUCKET_MS, y }); // x = bucket start timestamp
+    b.bucketEnd += BUCKET_MS;
+    b.acc   = 0;
+    b.count = 0;
+  }
+
+  // Accumulate into the current (open) bucket
+  b.acc += value;
+  b.count++;
+  return pts;
+}
+
+/**
+ * Feed a raw value, push any completed bucket points into the chart dataset,
+ * and trim to MAX_BUCKETS.  Returns true when at least one point was added.
+ */
+function pushBucketed(chart, dsIdx, b, ts, value) {
+  const pts = feedBuckets(b, ts, value);
+  if (!pts.length) return false;
+  const data = chart.data.datasets[dsIdx].data;
+  for (const p of pts) data.push(p);
+  while (data.length > MAX_BUCKETS) data.shift();
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MCU panel
+// ═══════════════════════════════════════════════════════════════
+
+function createMcuPanel(name) {
+  const id    = safeId(name);
+  const label = name === 'mcu' ? 'Main MCU' : 'MCU: ' + name.replace('mcu ', '');
+
+  const el = document.createElement('div');
+  el.className = 'panel';
+  el.innerHTML = `
+    <div class="panel-header">
+      <div class="panel-title">🔌 ${label}</div>
+    </div>
+    <div class="stats-row" id="mcu-stats-${id}"></div>
+
+    <div class="chart-block">
+      <div class="chart-label">Communication Errors (Δ per 10 s bucket)</div>
+      <div class="chart-wrap"><canvas id="mcu-err-${id}"></canvas></div>
+    </div>
+
+    <div class="chart-block">
+      <div class="chart-label">Communication Traffic (Δ bytes per 10 s bucket)</div>
+      <div class="chart-wrap"><canvas id="mcu-traffic-${id}"></canvas></div>
+    </div>
+
+    <div class="chart-block">
+      <div class="chart-label">MCU Performance (10 s bucket avg)</div>
+      <div class="chart-wrap"><canvas id="mcu-perf-${id}"></canvas></div>
+    </div>
+  `;
+  document.getElementById('mcu-panels').appendChild(el);
+
+  // Error chart: retransmit bytes / invalid bytes / retransmit_seq deltas
+  const errChart = makeChart(
+    document.getElementById(`mcu-err-${id}`).getContext('2d'),
+    [
+      ds('bytes_retransmit Δ', COLORS.retransmit),
+      ds('bytes_invalid Δ',    COLORS.invalid),
+      ds('retransmit_seq Δ',   COLORS.retransmit_seq, true),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'bytes / seqs', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
+  // Traffic chart: bytes written / read deltas
+  const trafficChart = makeChart(
+    document.getElementById(`mcu-traffic-${id}`).getContext('2d'),
+    [
+      ds('bytes_write Δ', COLORS.write),
+      ds('bytes_read Δ',  COLORS.read),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'bytes', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
+  // Performance chart: mcu_awake (%) on left Y, task timing (µs) on right Y
+  const perfChart = makeChart(
+    document.getElementById(`mcu-perf-${id}`).getContext('2d'),
+    [
+      ds('mcu_awake %',    COLORS.awake,       false, 'y'),
+      ds('task_avg µs',    COLORS.task_avg,    true,  'y1'),
+      ds('task_stddev µs', COLORS.task_stddev, true,  'y1'),
+    ],
+    {
+      x  : BASE_SCALE_X,
+      y  : {
+        ...BASE_SCALE_Y,
+        position: 'left',
+        max: 100,
+        title: { display: true, text: '%', color: '#a0a0b0', font: { size: 10 } },
+      },
+      y1 : {
+        ...BASE_SCALE_Y,
+        position: 'right',
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: 'µs', color: '#a0a0b0', font: { size: 10 } },
+      },
+    },
+  );
+
+  mcuState[name] = {
+    errChart, trafficChart, perfChart,
+    prev   : null,
+    statsEl: document.getElementById(`mcu-stats-${id}`),
+    // Bucket accumulators — one per chart series (delta counters → sum, levels → avg)
+    bRetransmit    : makeBuckets('sum'),
+    bInvalid       : makeBuckets('sum'),
+    bRetransmitSeq : makeBuckets('sum'),
+    bWrite         : makeBuckets('sum'),
+    bRead          : makeBuckets('sum'),
+    bAwake         : makeBuckets('avg'),
+    bTaskAvg       : makeBuckets('avg'),
+    bTaskStddev    : makeBuckets('avg'),
+  };
+}
+
+function onMcuData(name, stats, ts) {
+  const s = mcuState[name];
+  const prev = s.prev;
+  s.prev = { ...stats };
+
+  // ── Stat badges ───────────────────────────────────────────
+  const br  = stats.bytes_retransmit ?? 0;
+  const bi  = stats.bytes_invalid    ?? 0;
+  const srtt = stats.srtt != null ? (stats.srtt * 1000).toFixed(3) + ' ms' : '—';
+  const rto  = stats.rto  != null ? (stats.rto  * 1000).toFixed(1) + ' ms' : '—';
+
+  s.statsEl.innerHTML =
+    sb('bytes_write',      fmtBytes(stats.bytes_write ?? 0)) +
+    sb('bytes_read',       fmtBytes(stats.bytes_read  ?? 0)) +
+    sb('bytes_retransmit', br,  br  > 0 ? 'warn' : 'ok') +
+    sb('bytes_invalid',    bi,  bi  > 0 ? 'err'  : 'ok') +
+    sb('send_seq',         stats.send_seq    ?? '—') +
+    sb('receive_seq',      stats.receive_seq ?? '—') +
+    sb('srtt',             srtt) +
+    sb('rto',              rto);
+
+  if (!prev) return; // first update — no delta yet
+
+  const Δ = (k) => {
+    const v = (stats[k] ?? 0) - (prev[k] ?? 0);
+    return v < 0 ? 0 : v; // guard against counter reset
+  };
+
+  // Error chart — sum deltas into 10 s buckets
+  let dirty = false;
+  dirty |= pushBucketed(s.errChart,     0, s.bRetransmit,    ts, Δ('bytes_retransmit'));
+  dirty |= pushBucketed(s.errChart,     1, s.bInvalid,       ts, Δ('bytes_invalid'));
+  dirty |= pushBucketed(s.errChart,     2, s.bRetransmitSeq, ts, Δ('retransmit_seq'));
+  if (dirty) s.errChart.update('none');
+
+  // Traffic chart — sum deltas into 10 s buckets
+  dirty = false;
+  dirty |= pushBucketed(s.trafficChart, 0, s.bWrite, ts, Δ('bytes_write'));
+  dirty |= pushBucketed(s.trafficChart, 1, s.bRead,  ts, Δ('bytes_read'));
+  if (dirty) s.trafficChart.update('none');
+
+  // Performance chart — average levels over 10 s buckets
+  dirty = false;
+  dirty |= pushBucketed(s.perfChart, 0, s.bAwake,      ts, (stats.mcu_awake       ?? 0) * 100);
+  dirty |= pushBucketed(s.perfChart, 1, s.bTaskAvg,    ts, (stats.mcu_task_avg    ?? 0) * 1e6);
+  dirty |= pushBucketed(s.perfChart, 2, s.bTaskStddev, ts, (stats.mcu_task_stddev ?? 0) * 1e6);
+  if (dirty) s.perfChart.update('none');
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CAN bus panel
+// ═══════════════════════════════════════════════════════════════
+
+function createCanbusPanel(name) {
+  const id    = safeId(name);
+  const label = name.replace('canbus_stats ', '');
+
+  const el = document.createElement('div');
+  el.className = 'panel';
+  el.innerHTML = `
+    <div class="panel-header">
+      <div class="panel-title">🔗 CAN: ${label}</div>
+      <span class="bus-state unknown" id="can-state-${id}">unknown</span>
+    </div>
+    <div class="stats-row" id="can-stats-${id}"></div>
+
+    <div class="chart-block">
+      <div class="chart-label">Errors &amp; Retries (Δ per 10 s bucket)</div>
+      <div class="chart-wrap"><canvas id="can-chart-${id}"></canvas></div>
+    </div>
+  `;
+  document.getElementById('canbus-panels').appendChild(el);
+
+  const chart = makeChart(
+    document.getElementById(`can-chart-${id}`).getContext('2d'),
+    [
+      ds('rx_error Δ',   COLORS.rx_err),
+      ds('tx_error Δ',   COLORS.tx_err),
+      ds('tx_retries Δ', COLORS.tx_retry, true),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'count', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
+  canbusState[name] = {
+    chart,
+    prev   : null,
+    statsEl: document.getElementById(`can-stats-${id}`),
+    stateEl: document.getElementById(`can-state-${id}`),
+    // Bucket accumulators — sum error/retry deltas over 10 s
+    bRxErr  : makeBuckets('sum'),
+    bTxErr  : makeBuckets('sum'),
+    bTxRetry: makeBuckets('sum'),
+  };
+}
+
+function onCanbusData(name, data, ts) {
+  const s = canbusState[name];
+
+  // ── Bus state badge ───────────────────────────────────────
+  const state = (data.bus_state ?? 'unknown').replace(/\s+/g, '_').toLowerCase();
+  s.stateEl.textContent = data.bus_state ?? 'unknown';
+  s.stateEl.className   = `bus-state ${state}`;
+
+  // ── Stat badges ───────────────────────────────────────────
+  const rxe = data.rx_error   ?? 0;
+  const txe = data.tx_error   ?? 0;
+  const txr = data.tx_retries ?? 0;
+
+  s.statsEl.innerHTML =
+    sb('rx_error',   rxe, rxe > 0 ? 'warn' : 'ok') +
+    sb('tx_error',   txe, txe > 0 ? 'warn' : 'ok') +
+    sb('tx_retries', txr, txr > 0 ? 'warn' : 'ok');
+
+  const prev = s.prev;
+  s.prev = { rx_error: rxe, tx_error: txe, tx_retries: txr };
+
+  if (!prev) return;
+
+  const Δ = (cur, p) => { const v = cur - p; return v < 0 ? 0 : v; };
+
+  // Sum error/retry deltas into 10 s buckets
+  let dirty = false;
+  dirty |= pushBucketed(s.chart, 0, s.bRxErr,   ts, Δ(rxe, prev.rx_error));
+  dirty |= pushBucketed(s.chart, 1, s.bTxErr,   ts, Δ(txe, prev.tx_error));
+  dirty |= pushBucketed(s.chart, 2, s.bTxRetry, ts, Δ(txr, prev.tx_retries));
+  if (dirty) s.chart.update('none');
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Utility functions
+// ═══════════════════════════════════════════════════════════════
+
+/** Convert an object name to a CSS-safe id fragment. */
+function safeId(name) {
+  return name.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+/** Format byte counts as human-readable. */
+function fmtBytes(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + ' MB';
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+/** Build a stat badge HTML string. */
+function sb(label, value, cls = '') {
+  return `<span class="sb ${cls}"><span class="lbl">${label}:</span><span class="val">${value}</span></span>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Boot
+// ═══════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  const host = guessHost();
+  if (host) {
+    document.getElementById('host-input').value = host;
+    // Auto-connect when served from a real printer host
+    connect();
+  }
+});
+</script>
+
+</body>
+</html>
