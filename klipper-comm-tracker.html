@@ -685,7 +685,7 @@ async function initialise() {
     // Process the status snapshot from the subscribe response immediately so
     // charts have baseline values before the first live update arrives.
     if (subRes && subRes.status) {
-      handleUpdate(subRes.status);
+      handleUpdate(subRes.status, true);
     }
 
     // Fetch a full snapshot via HTTP to pre-populate fields that Moonraker omits
@@ -698,7 +698,7 @@ async function initialise() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       if (json && json.result && json.result.status) {
-        handleUpdate(json.result.status);
+        handleUpdate(json.result.status, true);
       }
     } catch (qe) {
       log(`Initial HTTP query failed (non-fatal): ${qe.message}`, 'warn');
@@ -709,15 +709,15 @@ async function initialise() {
 }
 
 // ── Status update router ──────────────────────────────────────
-function handleUpdate(status) {
+function handleUpdate(status, seed = false) {
   const ts = Date.now();
   for (const [name, data] of Object.entries(status)) {
     if (name === 'mcu' || name.startsWith('mcu ')) {
-      if (data.last_stats && mcuState[name]) onMcuData(name, data.last_stats, ts);
+      if (data.last_stats && mcuState[name]) onMcuData(name, data.last_stats, ts, seed);
     } else if (name.startsWith('canbus_stats')) {
-      if (canbusState[name]) onCanbusData(name, data, ts);
+      if (canbusState[name]) onCanbusData(name, data, ts, seed);
     } else if (name === 'system_stats') {
-      onHostData(data, ts);
+      onHostData(data, ts, seed);
     }
   }
 }
@@ -844,6 +844,22 @@ function pushBucketed(chart, dsIdx, b, ts, value) {
   return true;
 }
 
+/**
+ * Immediately emit a snapshot point at ts without waiting for a bucket to close.
+ * Primes b.lastEmitted and b.bucketEnd so carry-forward and subsequent normal
+ * bucket flushes continue to work correctly.  Always returns true.
+ */
+function seedChart(chart, dsIdx, b, ts, value) {
+  if (b.bucketEnd === 0) {
+    b.bucketEnd = (Math.floor(ts / BUCKET_MS) + 1) * BUCKET_MS;
+  }
+  b.lastEmitted = value;
+  const data = chart.data.datasets[dsIdx].data;
+  data.push({ x: ts, y: value });
+  while (data.length > MAX_BUCKETS) data.shift();
+  return true;
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  MCU panel (by device)
 // ═══════════════════════════════════════════════════════════════
@@ -945,7 +961,7 @@ function createMcuPanel(name) {
   };
 }
 
-function onMcuData(name, stats, ts) {
+function onMcuData(name, stats, ts, seed = false) {
   const s = mcuState[name];
 
   // Merge only the fields that are actually present in this (possibly partial) update.
@@ -971,26 +987,31 @@ function onMcuData(name, stats, ts) {
     sb('srtt',             srtt) +
     sb('rto',              rto);
 
+  // Choose between immediate seed point and normal bucketed accumulation.
+  const applyChart = seed
+    ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
+    : (chart, dsIdx, b, val) => pushBucketed(chart, dsIdx, b, ts, val);
+
   // ── Per-device charts — only feed when the field arrived in this update ───
   let dirty = false;
 
   // Error chart
-  if (stats.bytes_retransmit !== undefined) dirty |= pushBucketed(s.errChart, 0, s.bRetransmit,    ts, L.bytes_retransmit);
-  if (stats.bytes_invalid    !== undefined) dirty |= pushBucketed(s.errChart, 1, s.bInvalid,       ts, L.bytes_invalid);
-  if (stats.retransmit_seq   !== undefined) dirty |= pushBucketed(s.errChart, 2, s.bRetransmitSeq, ts, L.retransmit_seq);
+  if (stats.bytes_retransmit !== undefined) dirty |= applyChart(s.errChart, 0, s.bRetransmit,    L.bytes_retransmit);
+  if (stats.bytes_invalid    !== undefined) dirty |= applyChart(s.errChart, 1, s.bInvalid,       L.bytes_invalid);
+  if (stats.retransmit_seq   !== undefined) dirty |= applyChart(s.errChart, 2, s.bRetransmitSeq, L.retransmit_seq);
   if (dirty) s.errChart.update('none');
 
   // Traffic chart
   dirty = false;
-  if (stats.bytes_write !== undefined) dirty |= pushBucketed(s.trafficChart, 0, s.bWrite, ts, L.bytes_write);
-  if (stats.bytes_read  !== undefined) dirty |= pushBucketed(s.trafficChart, 1, s.bRead,  ts, L.bytes_read);
+  if (stats.bytes_write !== undefined) dirty |= applyChart(s.trafficChart, 0, s.bWrite, L.bytes_write);
+  if (stats.bytes_read  !== undefined) dirty |= applyChart(s.trafficChart, 1, s.bRead,  L.bytes_read);
   if (dirty) s.trafficChart.update('none');
 
   // Performance chart
   dirty = false;
-  if (stats.mcu_awake       !== undefined) dirty |= pushBucketed(s.perfChart, 0, s.bAwake,      ts, L.mcu_awake       * 100);
-  if (stats.mcu_task_avg    !== undefined) dirty |= pushBucketed(s.perfChart, 1, s.bTaskAvg,    ts, L.mcu_task_avg    * 1e6);
-  if (stats.mcu_task_stddev !== undefined) dirty |= pushBucketed(s.perfChart, 2, s.bTaskStddev, ts, L.mcu_task_stddev * 1e6);
+  if (stats.mcu_awake       !== undefined) dirty |= applyChart(s.perfChart, 0, s.bAwake,      L.mcu_awake       * 100);
+  if (stats.mcu_task_avg    !== undefined) dirty |= applyChart(s.perfChart, 1, s.bTaskAvg,    L.mcu_task_avg    * 1e6);
+  if (stats.mcu_task_stddev !== undefined) dirty |= applyChart(s.perfChart, 2, s.bTaskStddev, L.mcu_task_stddev * 1e6);
   if (dirty) s.perfChart.update('none');
 
   // ── Stat-grouped charts ───────────────────────────────────
@@ -1001,7 +1022,7 @@ function onMcuData(name, stats, ts) {
     const dsIdx = sc.dsIdx[name];
     if (dsIdx === undefined) continue;
     const val = def.scale ? def.scale(L[def.key]) : L[def.key];
-    if (pushBucketed(sc.chart, dsIdx, sc.buckets[name], ts, val)) {
+    if (applyChart(sc.chart, dsIdx, sc.buckets[name], val)) {
       sc.chart.update('none');
     }
   }
@@ -1056,7 +1077,7 @@ function createCanbusPanel(name) {
   };
 }
 
-function onCanbusData(name, data, ts) {
+function onCanbusData(name, data, ts, seed = false) {
   const s = canbusState[name];
 
   // Merge only the fields that are actually present in this (possibly partial) update.
@@ -1082,11 +1103,15 @@ function onCanbusData(name, data, ts) {
     sb('tx_error',   txe, txe > 0 ? 'warn' : 'ok') +
     sb('tx_retries', txr, txr > 0 ? 'warn' : 'ok');
 
+  const applyChart = seed
+    ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
+    : (chart, dsIdx, b, val) => pushBucketed(chart, dsIdx, b, ts, val);
+
   // ── Per-device chart — only feed when the field arrived in this update ────
   let dirty = false;
-  if (data.rx_error   !== undefined) dirty |= pushBucketed(s.chart, 0, s.bRxErr,   ts, L.rx_error);
-  if (data.tx_error   !== undefined) dirty |= pushBucketed(s.chart, 1, s.bTxErr,   ts, L.tx_error);
-  if (data.tx_retries !== undefined) dirty |= pushBucketed(s.chart, 2, s.bTxRetry, ts, L.tx_retries);
+  if (data.rx_error   !== undefined) dirty |= applyChart(s.chart, 0, s.bRxErr,   L.rx_error);
+  if (data.tx_error   !== undefined) dirty |= applyChart(s.chart, 1, s.bTxErr,   L.tx_error);
+  if (data.tx_retries !== undefined) dirty |= applyChart(s.chart, 2, s.bTxRetry, L.tx_retries);
   if (dirty) s.chart.update('none');
 
   // ── Stat-grouped charts ───────────────────────────────────
@@ -1097,7 +1122,7 @@ function onCanbusData(name, data, ts) {
     const dsIdx = sc.dsIdx[name];
     if (dsIdx === undefined) continue;
     const val = def.scale ? def.scale(L[def.key]) : L[def.key];
-    if (pushBucketed(sc.chart, dsIdx, sc.buckets[name], ts, val)) {
+    if (applyChart(sc.chart, dsIdx, sc.buckets[name], val)) {
       sc.chart.update('none');
     }
   }
@@ -1154,7 +1179,7 @@ function createHostPanel() {
   };
 }
 
-function onHostData(data, ts) {
+function onHostData(data, ts, seed = false) {
   const s = hostState['system_stats'];
   if (!s) return;
 
@@ -1174,10 +1199,14 @@ function onHostData(data, ts) {
     sb('memavail', memavail) +
     sb('cputime',  cputime);
 
+  const applyChart = seed
+    ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
+    : (chart, dsIdx, b, val) => pushBucketed(chart, dsIdx, b, ts, val);
+
   // ── Chart — only feed when the field arrived in this update ──
   let dirty = false;
-  if (data.sysload  !== undefined) dirty |= pushBucketed(s.chart, 0, s.bSysload,  ts, L.sysload);
-  if (data.memavail !== undefined) dirty |= pushBucketed(s.chart, 1, s.bMemAvail, ts, L.memavail / 1024); // kB → MB
+  if (data.sysload  !== undefined) dirty |= applyChart(s.chart, 0, s.bSysload,  L.sysload);
+  if (data.memavail !== undefined) dirty |= applyChart(s.chart, 1, s.bMemAvail, L.memavail / 1024); // kB → MB
   if (dirty) s.chart.update('none');
 }
 
