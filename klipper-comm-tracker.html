@@ -343,8 +343,9 @@
 'use strict';
 
 // ── Constants ────────────────────────────────────────────────
-// Bucket-based aggregation: values within each BUCKET_MS window are
-// summed (for deltas) or averaged (for levels) before being stored.
+// Bucket-based aggregation: raw values within each BUCKET_MS window are
+// aggregated before being stored — 'last' (most-recent sample) for cumulative
+// counters, 'avg' (mean) for level/rate values.
 // This keeps chart point counts manageable while retaining long history.
 const BUCKET_MS   = 10_000;                       // 10-second aggregation buckets
 const MAX_BUCKETS = (12 * 60 * 60) / (BUCKET_MS / 1000); // 12 h ÷ 10 s = 4 320 buckets
