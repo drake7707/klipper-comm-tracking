@@ -310,6 +310,11 @@
 
   <!-- ── By-Device view ─────────────────────────────────────── -->
   <div id="view-device">
+    <section id="host-section" style="display:none">
+      <h2>Host Load</h2>
+      <div class="panels-grid" id="host-panels"></div>
+    </section>
+
     <section id="mcu-section" style="display:none">
       <h2>MCU Statistics — By Device</h2>
       <div class="panels-grid" id="mcu-panels"></div>
@@ -364,6 +369,8 @@ const COLORS = {
   rx_err        : '#e74c3c',
   tx_err        : '#f28c28',
   tx_retry      : '#f1c40f',
+  cpu_load      : '#00d4aa',
+  mem_avail     : '#9b59b6',
 };
 
 // Color palette used for the "By Stat" multi-series charts (one color per device)
@@ -400,6 +407,7 @@ let currentHost = null;     // host we last successfully initialised against
 const pending          = {};  // id → {resolve, reject}
 const mcuState         = {};  // name → {errChart, trafficChart, perfChart, statsEl, b*}
 const canbusState      = {};  // name → {chart, statsEl, stateEl, b*}
+const hostState        = {};  // 'system_stats' → {chart, statsEl, bSysload, bMemAvail, last}
 const mcuStatCharts    = {};  // statKey → {chart, buckets:{mcuName→bucket}, def, dsIdx:{mcuName→int}}
 const canbusStatCharts = {};  // statKey → {chart, buckets:{canbusName→bucket}, def, dsIdx:{canbusName→int}}
 
@@ -536,20 +544,26 @@ function clearPanels() {
   for (const s of Object.values(canbusState)) {
     s.chart.destroy();
   }
+  for (const s of Object.values(hostState)) {
+    s.chart.destroy();
+  }
   for (const sc of Object.values(mcuStatCharts))    sc.chart.destroy();
   for (const sc of Object.values(canbusStatCharts)) sc.chart.destroy();
 
   for (const k of Object.keys(mcuState))         delete mcuState[k];
   for (const k of Object.keys(canbusState))       delete canbusState[k];
+  for (const k of Object.keys(hostState))         delete hostState[k];
   for (const k of Object.keys(mcuStatCharts))     delete mcuStatCharts[k];
   for (const k of Object.keys(canbusStatCharts))  delete canbusStatCharts[k];
 
-  document.getElementById('mcu-panels').innerHTML         = '';
-  document.getElementById('canbus-panels').innerHTML      = '';
-  document.getElementById('mcu-stat-panels').innerHTML    = '';
-  document.getElementById('canbus-stat-panels').innerHTML = '';
+  document.getElementById('host-panels').innerHTML          = '';
+  document.getElementById('mcu-panels').innerHTML           = '';
+  document.getElementById('canbus-panels').innerHTML        = '';
+  document.getElementById('mcu-stat-panels').innerHTML      = '';
+  document.getElementById('canbus-stat-panels').innerHTML   = '';
 
-  document.getElementById('mcu-section').style.display          = 'none';
+  document.getElementById('host-section').style.display          = 'none';
+  document.getElementById('mcu-section').style.display           = 'none';
   document.getElementById('canbus-section').style.display        = 'none';
   document.getElementById('mcu-stat-section').style.display      = 'none';
   document.getElementById('canbus-stat-section').style.display   = 'none';
@@ -586,6 +600,14 @@ function clearChartData() {
     s.bTxRetry = makeBuckets('last');
     s.last = {};
   }
+  // Host load chart
+  for (const s of Object.values(hostState)) {
+    s.chart.data.datasets.forEach(d => { d.data = []; });
+    s.chart.update('none');
+    s.bSysload  = makeBuckets('avg');
+    s.bMemAvail = makeBuckets('avg');
+    s.last = {};
+  }
   // Stat-grouped MCU charts
   for (const sc of Object.values(mcuStatCharts)) {
     sc.chart.data.datasets.forEach(d => { d.data = []; });
@@ -616,12 +638,13 @@ async function initialise() {
 
     const mcuObjs    = objects.filter(o => o === 'mcu' || o.startsWith('mcu '));
     const canbusObjs = objects.filter(o => o.startsWith('canbus_stats'));
+    const hasHost    = objects.includes('system_stats');
 
     log(`MCUs: ${mcuObjs.join(', ') || '(none)'}`);
     log(`CAN interfaces: ${canbusObjs.join(', ') || '(none)'}`);
 
-    if (!mcuObjs.length && !canbusObjs.length) {
-      log('No MCU or canbus_stats objects found.', 'err');
+    if (!mcuObjs.length && !canbusObjs.length && !hasHost) {
+      log('No MCU, canbus_stats, or system_stats objects found.', 'err');
       return;
     }
 
@@ -629,11 +652,13 @@ async function initialise() {
     // for objects that were already tracked before a reconnect).
     mcuObjs.forEach(n    => { if (!mcuState[n])    createMcuPanel(n);    });
     canbusObjs.forEach(n => { if (!canbusState[n]) createCanbusPanel(n); });
+    if (hasHost && !hostState['system_stats']) createHostPanel();
 
     // Stat-grouped charts are created once per session (same guard pattern).
     if (mcuObjs.length    && !mcuStatCharts[MCU_STAT_DEFS[0].key])       createMcuStatCharts(mcuObjs);
     if (canbusObjs.length && !canbusStatCharts[CANBUS_STAT_DEFS[0].key]) createCanbusStatCharts(canbusObjs);
 
+    if (hasHost)          document.getElementById('host-section').style.display        = '';
     if (mcuObjs.length) {
       document.getElementById('mcu-section').style.display     = '';
       document.getElementById('mcu-stat-section').style.display = '';
@@ -645,13 +670,28 @@ async function initialise() {
 
     // Build subscription request – null means subscribe to all fields
     const subObjects = {};
+    if (hasHost) subObjects['system_stats'] = null;
     mcuObjs.forEach(o    => { subObjects[o] = null; });
     canbusObjs.forEach(o => { subObjects[o] = null; });
 
     const subRes = await sendRpc('printer.objects.subscribe', { objects: subObjects });
     log('Subscribed to object updates.', 'ok');
 
-    // Process the initial full status snapshot included in the subscribe response
+    // Do an explicit query to get a guaranteed full snapshot of all fields,
+    // even those that Moonraker omits from updates when their value hasn't changed.
+    // We process this before (or alongside) the subscribe response so that s.last
+    // is pre-populated with real values rather than waiting for the first change.
+    try {
+      const queryRes = await sendRpc('printer.objects.query', { objects: subObjects });
+      if (queryRes && queryRes.status) {
+        handleUpdate(queryRes.status);
+      }
+    } catch (qe) {
+      log(`Initial query failed (non-fatal): ${qe.message}`, 'warn');
+    }
+
+    // Also process the status snapshot from the subscribe response itself
+    // (it may contain fields not returned by query in some edge cases).
     if (subRes && subRes.status) {
       handleUpdate(subRes.status);
     }
@@ -668,6 +708,8 @@ function handleUpdate(status) {
       if (data.last_stats && mcuState[name]) onMcuData(name, data.last_stats, ts);
     } else if (name.startsWith('canbus_stats')) {
       if (canbusState[name]) onCanbusData(name, data, ts);
+    } else if (name === 'system_stats') {
+      onHostData(data, ts);
     }
   }
 }
@@ -1051,6 +1093,84 @@ function onCanbusData(name, data, ts) {
       sc.chart.update('none');
     }
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Host load panel (system_stats)
+// ═══════════════════════════════════════════════════════════════
+
+function createHostPanel() {
+  const el = document.createElement('div');
+  el.className = 'panel';
+  el.innerHTML = `
+    <div class="panel-header">
+      <div class="panel-title">🖥️ Host Load</div>
+    </div>
+    <div class="stats-row" id="host-stats"></div>
+
+    <div class="chart-block">
+      <div class="chart-label">CPU Load &amp; Available Memory</div>
+      <div class="chart-wrap"><canvas id="host-chart"></canvas></div>
+    </div>
+  `;
+  document.getElementById('host-panels').appendChild(el);
+
+  const chart = makeChart(
+    document.getElementById('host-chart').getContext('2d'),
+    [
+      ds('sysload',  COLORS.cpu_load,  false, 'y'),
+      ds('memavail (MB)', COLORS.mem_avail, true,  'y1'),
+    ],
+    {
+      x  : BASE_SCALE_X,
+      y  : {
+        ...BASE_SCALE_Y,
+        position: 'left',
+        title: { display: true, text: 'load', color: '#a0a0b0', font: { size: 10 } },
+      },
+      y1 : {
+        ...BASE_SCALE_Y,
+        position: 'right',
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: 'MB', color: '#a0a0b0', font: { size: 10 } },
+      },
+    },
+  );
+
+  hostState['system_stats'] = {
+    chart,
+    statsEl  : document.getElementById('host-stats'),
+    last     : {},
+    bSysload : makeBuckets('avg'),
+    bMemAvail: makeBuckets('avg'),
+  };
+}
+
+function onHostData(data, ts) {
+  const s = hostState['system_stats'];
+  if (!s) return;
+
+  // Merge only present fields into the last-known cache.
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== undefined && v !== null) s.last[k] = v;
+  }
+  const L = s.last;
+
+  // ── Stat badges ───────────────────────────────────────────
+  const sysload  = L.sysload  != null ? L.sysload.toFixed(2)                           : '—';
+  const memavail = L.memavail != null ? fmtBytes((L.memavail) * 1024) + ' avail'       : '—';
+  const cputime  = L.cputime  != null ? L.cputime.toFixed(1) + ' s'                    : '—';
+
+  s.statsEl.innerHTML =
+    sb('sysload',  sysload) +
+    sb('memavail', memavail) +
+    sb('cputime',  cputime);
+
+  // ── Chart — only feed when the field arrived in this update ──
+  let dirty = false;
+  if (data.sysload  !== undefined) dirty |= pushBucketed(s.chart, 0, s.bSysload,  ts, L.sysload);
+  if (data.memavail !== undefined) dirty |= pushBucketed(s.chart, 1, s.bMemAvail, ts, L.memavail / 1024); // kB → MB
+  if (dirty) s.chart.update('none');
 }
 
 // ═══════════════════════════════════════════════════════════════
