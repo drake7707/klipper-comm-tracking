@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Klipper Comm Tracker</title>
+  <title>Klipper Diagnostics</title>
 
   <!-- Chart.js 4.x + date-fns adapter for time-series X axis -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
@@ -132,6 +132,7 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(580px, 1fr));
       gap: 18px;
+      align-items: start;  /* panels take their own height — collapsed panels don't stretch */
     }
 
     /* ── Panel card ───────────────────────────────────────── */
@@ -309,10 +310,10 @@
     }
     .collapse-btn:hover { color: var(--text); filter: none; }
     .panel--collapsed .collapse-btn  { transform: rotate(-90deg); }
-    /* When collapsed: hide body, remove bottom padding/margin so panel
-       shrinks to header height only instead of leaving blank space.      */
+    /* When collapsed: hide body, shrink panel to header-only height.
+       padding-bottom: 8px keeps a small symmetric margin below the header. */
     .panel--collapsed .panel-body    { display: none; }
-    .panel--collapsed                { padding-bottom: 0; }
+    .panel--collapsed                { padding-bottom: 8px; }
     .panel--collapsed .panel-header  { margin-bottom: 0; }
 
     /* ── View toggle tabs ─────────────────────────────────────── */
@@ -344,7 +345,7 @@
 
 <!-- ═══════════════════════ HEADER ══════════════════════════ -->
 <header>
-  <h1>Klipper Comm Tracker</h1>
+  <h1>Klipper Diagnostics</h1>
   <span class="history-info">10 s buckets · up to 12 h history</span>
   <div class="view-tabs">
     <button id="tab-device" class="tab-btn active" onclick="setView('device')">By Device</button>
@@ -501,7 +502,7 @@ const CANBUS_STAT_DEFS = [
   {
     key: 'rx_error', yLabel: 'count', mode: 'last', scale: null,
     title: 'RX Errors (rx_error)',
-    tooltip: 'Cumulative receive errors detected by the micro-controller CAN hardware. Increments on CRC errors, bit-stuffing errors, or framing errors on received frames. Per the CAN specification, a count above 127 causes the controller to enter error-passive mode where it can no longer transmit error frames.',
+    tooltip: 'Cumulative receive errors detected by the micro-controller CAN hardware. Increments on CRC errors, bit-stuffing errors, or framing errors on received frames.',
   },
   {
     key: 'tx_error', yLabel: 'count', mode: 'last', scale: null,
@@ -1002,29 +1003,42 @@ function feedBuckets(b, ts, value) {
 /**
  * Feed a raw value, push any completed bucket points into the chart dataset,
  * and trim to MAX_BUCKETS.  Returns true when at least one point was added.
+ * Monotonic guard: points that would go backward (x ≤ last point's x) are skipped.
  */
 function pushBucketed(chart, dsIdx, b, ts, value) {
   const pts = feedBuckets(b, ts, value);
   if (!pts.length) return false;
   const data = chart.data.datasets[dsIdx].data;
-  for (const p of pts) data.push(p);
+  let added = false;
+  for (const p of pts) {
+    // Never add a point that goes backward or duplicate timestamps
+    if (!data.length || p.x > data[data.length - 1].x) {
+      data.push(p);
+      added = true;
+    }
+  }
   while (data.length > MAX_BUCKETS) data.shift();
-  return true;
+  return added;
 }
 
 /**
  * Immediately emit a snapshot point at ts without waiting for a bucket to close.
- * Primes b.lastEmitted and b.bucketEnd so carry-forward and subsequent normal
- * bucket flushes continue to work correctly.  Always returns true.
+ * Always advances b.bucketEnd to the next boundary ≥ ts so that subsequent
+ * feedBuckets calls start from ts, not from a stale restored value.
+ * Monotonic guard: skips the push if ts ≤ last point's x.
  */
 function seedChart(chart, dsIdx, b, ts, value) {
-  if (b.bucketEnd === 0) {
-    b.bucketEnd = (Math.floor(ts / BUCKET_MS) + 1) * BUCKET_MS;
-  }
+  // Always advance bucketEnd — critical when b.bucketEnd was restored from
+  // localStorage (which would be in the past), as leaving it stale would cause
+  // feedBuckets to emit phantom backward-dated carry-forward points.
+  b.bucketEnd = (Math.floor(ts / BUCKET_MS) + 1) * BUCKET_MS;
   b.lastEmitted = value;
   const data = chart.data.datasets[dsIdx].data;
-  data.push({ x: ts, y: value });
-  while (data.length > MAX_BUCKETS) data.shift();
+  // Monotonic guard: never push a point before or at the last existing point
+  if (!data.length || ts > data[data.length - 1].x) {
+    data.push({ x: ts, y: value });
+    while (data.length > MAX_BUCKETS) data.shift();
+  }
   return true;
 }
 
@@ -1312,7 +1326,7 @@ function onCanbusData(name, data, ts, seed = false) {
 
   s.statsEl.innerHTML =
     sb('RX errors',   rxErrors,  rxErrors  > 0 ? 'warn' : 'ok',
-       'Cumulative receive errors detected by the MCU CAN hardware. Increments on CRC errors, bit-stuffing, or framing errors. Per the CAN spec, values above 127 cause the controller to enter error-passive mode (no longer transmits error frames).') +
+       'Cumulative receive errors detected by the MCU CAN hardware. Increments on CRC errors, bit-stuffing errors, or framing errors on received frames.') +
     sb('TX errors',   txErrors,  txErrors  > 0 ? 'warn' : 'ok',
        'Cumulative transmit errors detected by the MCU CAN hardware. Increments when a transmitted frame receives no acknowledgement from any bus node. High values indicate missing termination or a disconnected device. Note: rp2040/rp2350 MCUs always report 0 here.') +
     sb('TX retries',  txRetries, txRetries > 0 ? 'warn' : 'ok',
@@ -1682,13 +1696,19 @@ function restoreFromLocalStorage() {
   for (const [name, saved] of Object.entries(state.mcuPanels || {})) {
     const s = mcuState[name];
     if (!s) continue;
-    s.last = saved.last || {};
     const charts = [
       [s.errChart,     saved.errData],
       [s.trafficChart, saved.trafficData],
       [s.perfChart,    saved.perfData],
       [s.srttChart,    saved.srttData],
     ];
+    // On reconnect the charts already have live in-memory data; skip restoring
+    // older saved data to prevent overwriting more recent points.
+    const alreadyHasData = charts.some(([chart]) =>
+      chart.data.datasets.some(d => d.data.length > 0));
+    if (alreadyHasData) continue;
+
+    s.last = saved.last || {};
     for (const [chart, dataArrays] of charts) {
       if (!dataArrays) continue;
       chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
@@ -1701,6 +1721,9 @@ function restoreFromLocalStorage() {
   for (const [name, saved] of Object.entries(state.canbusPanels || {})) {
     const s = canbusState[name];
     if (!s) continue;
+    // Skip if live data already present
+    if (s.chart.data.datasets.some(d => d.data.length > 0)) continue;
+
     s.last = saved.last || {};
     if (saved.data) {
       s.chart.data.datasets.forEach((d, i) => { d.data = saved.data[i] || []; });
@@ -1713,25 +1736,30 @@ function restoreFromLocalStorage() {
   if (state.hostPanel) {
     const hs = hostState['system_stats'];
     if (hs) {
-      hs.last = state.hostPanel.last || {};
-      if (state.hostPanel.data) {
-        hs.chart.data.datasets.forEach((d, i) => { d.data = state.hostPanel.data[i] || []; });
-        hs.chart.update('none');
+      // Skip if live data already present
+      if (!hs.chart.data.datasets.some(d => d.data.length > 0)) {
+        hs.last = state.hostPanel.last || {};
+        if (state.hostPanel.data) {
+          hs.chart.data.datasets.forEach((d, i) => { d.data = state.hostPanel.data[i] || []; });
+          hs.chart.update('none');
+        }
+        if (state.hostPanel.buckets) Object.assign(hs, state.hostPanel.buckets);
+        restoredPanels++;
       }
-      if (state.hostPanel.buckets) Object.assign(hs, state.hostPanel.buckets);
-      restoredPanels++;
     }
   }
 
   for (const [key, dataArrays] of Object.entries(state.mcuStatData || {})) {
     const sc = mcuStatCharts[key];
     if (!sc || !dataArrays) continue;
+    if (sc.chart.data.datasets.some(d => d.data.length > 0)) continue;
     sc.chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
     sc.chart.update('none');
   }
   for (const [key, dataArrays] of Object.entries(state.canbusStatData || {})) {
     const sc = canbusStatCharts[key];
     if (!sc || !dataArrays) continue;
+    if (sc.chart.data.datasets.some(d => d.data.length > 0)) continue;
     sc.chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
     sc.chart.update('none');
   }
