@@ -1680,12 +1680,9 @@ function createSensorPanels(tempObjs, heaterObjs) {
     document.getElementById('sensor-panels').appendChild(panelEl);
 
     const palette  = heaterObjs.map((_, i) => DEVICE_PALETTE[i % DEVICE_PALETTE.length]);
-    const datasets = heaterObjs.map((name, i) => {
-      const label = name === 'extruder' ? 'Extruder'
-                  : name === 'heater_bed' ? 'Bed'
-                  : name;
-      return ds(label, palette[i]);
-    });
+    const datasets = heaterObjs.map((name, i) =>
+      ds(heaterLabel(name), palette[i])
+    );
     const chart = makeChart(
       document.getElementById('heater-chart').getContext('2d'),
       datasets,
@@ -1725,7 +1722,7 @@ function onTempSensorData(name, data, ts, seed = false) {
   tc.statsEl.innerHTML = Object.entries(tc.dsIdx).map(([n, i]) => {
     const v     = tc.latestValues[n];
     const label = n.replace('temperature_sensor ', '');
-    const valStr = v != null ? v.toFixed(1) + ' °C' : '—';
+    const valStr = v != null ? fmtStatVal(v, '°C') : '—';
     const color  = tc.palette[i];
     return `<span class="sb"><span class="lbl">${label}:</span><span class="val" style="color:${color}">${valStr}</span></span>`;
   }).join('');
@@ -1750,17 +1747,21 @@ function onHeaterData(name, data, ts, seed = false) {
   }
 
   hc.statsEl.innerHTML = Object.entries(hc.dsIdx).map(([n, i]) => {
-    const v     = hc.latestValues[n];
-    const label = n === 'extruder' ? 'Extruder' : n === 'heater_bed' ? 'Bed' : n;
-    const valStr = v != null ? v.toFixed(1) + ' %' : '—';
+    const v      = hc.latestValues[n];
+    const valStr = v != null ? fmtStatVal(v, '%') : '—';
     const color  = hc.palette[i];
-    return `<span class="sb"><span class="lbl">${label}:</span><span class="val" style="color:${color}">${valStr}</span></span>`;
+    return `<span class="sb"><span class="lbl">${heaterLabel(n)}:</span><span class="val" style="color:${color}">${valStr}</span></span>`;
   }).join('');
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  Utility functions
 // ═══════════════════════════════════════════════════════════════
+
+/** Map an extruder/heater object name to a short display label. */
+function heaterLabel(name) {
+  return name === 'extruder' ? 'Extruder' : name === 'heater_bed' ? 'Bed' : name;
+}
 
 /** Convert an object name to a CSS-safe id fragment. */
 function safeId(name) {
