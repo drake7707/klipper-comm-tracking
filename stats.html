@@ -126,7 +126,27 @@
       margin-bottom: 14px;
       padding-bottom: 8px;
       border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
+
+    .section-collapse-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 2px 9px;
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: .04em;
+      text-transform: none;
+      line-height: 1.5;
+      flex-shrink: 0;
+      transition: color 0.15s;
+    }
+    .section-collapse-btn:hover { color: var(--text); filter: none; }
 
     .panels-grid {
       display: grid;
@@ -346,7 +366,7 @@
 <!-- ═══════════════════════ HEADER ══════════════════════════ -->
 <header>
   <h1>Klipper Diagnostics</h1>
-  <span class="history-info">10 s buckets · up to 12 h history</span>
+  <span class="history-info">2 s buckets · up to 12 h history</span>
   <div class="view-tabs">
     <button id="tab-device" class="tab-btn active" onclick="setView('device')">By Device</button>
     <button id="tab-stat"   class="tab-btn"        onclick="setView('stat')">By Stat</button>
@@ -376,22 +396,22 @@
   <!-- ── By-Device view ─────────────────────────────────────── -->
   <div id="view-device">
     <section id="host-section" style="display:none">
-      <h2>Host Load</h2>
+      <h2>Host Load<button class="section-collapse-btn" onclick="toggleSectionPanels('host-section', this)">Collapse All</button></h2>
       <div class="panels-grid" id="host-panels"></div>
     </section>
 
     <section id="mcu-section" style="display:none">
-      <h2>MCU Statistics — By Device</h2>
+      <h2>MCU Statistics — By Device<button class="section-collapse-btn" onclick="toggleSectionPanels('mcu-section', this)">Collapse All</button></h2>
       <div class="panels-grid" id="mcu-panels"></div>
     </section>
 
     <section id="canbus-section" style="display:none">
-      <h2>CAN Bus Statistics — By Device</h2>
+      <h2>CAN Bus Statistics — By Device<button class="section-collapse-btn" onclick="toggleSectionPanels('canbus-section', this)">Collapse All</button></h2>
       <div class="panels-grid" id="canbus-panels"></div>
     </section>
 
     <section id="sensor-section" style="display:none">
-      <h2>Temperatures &amp; Heater Power</h2>
+      <h2>Temperatures &amp; Heater Power<button class="section-collapse-btn" onclick="toggleSectionPanels('sensor-section', this)">Collapse All</button></h2>
       <div class="panels-grid" id="sensor-panels"></div>
     </section>
   </div>
@@ -399,12 +419,12 @@
   <!-- ── By-Stat view ───────────────────────────────────────── -->
   <div id="view-stat" style="display:none">
     <section id="mcu-stat-section" style="display:none">
-      <h2>MCU Statistics — By Stat (all MCUs)</h2>
+      <h2>MCU Statistics — By Stat (all MCUs)<button class="section-collapse-btn" onclick="toggleSectionPanels('mcu-stat-section', this)">Collapse All</button></h2>
       <div class="panels-grid" id="mcu-stat-panels"></div>
     </section>
 
     <section id="canbus-stat-section" style="display:none">
-      <h2>CAN Bus Statistics — By Stat (all interfaces)</h2>
+      <h2>CAN Bus Statistics — By Stat (all interfaces)<button class="section-collapse-btn" onclick="toggleSectionPanels('canbus-stat-section', this)">Collapse All</button></h2>
       <div class="panels-grid" id="canbus-stat-panels"></div>
     </section>
   </div>
@@ -422,12 +442,12 @@
 // aggregated before being stored — 'last' (most-recent sample) for cumulative
 // counters, 'avg' (mean) for level/rate values.
 // This keeps chart point counts manageable while retaining long history.
-const BUCKET_MS    = 10_000;                       // 10-second aggregation buckets
+const BUCKET_MS    = 2_000;                        // 2-second aggregation buckets
 const HISTORY_MS   = 12 * 60 * 60 * 1000;         // 12 h in ms — prune threshold
-const MAX_BUCKETS  = HISTORY_MS / BUCKET_MS;       // 4 320 points max per series
+const MAX_BUCKETS  = HISTORY_MS / BUCKET_MS;       // 21 600 points max per series
 const RPC_TIMEOUT_MS = 12_000;                     // JSON-RPC call timeout
 const MAX_LOG_LINES  = 120;                        // max lines kept in the log panel
-const STORAGE_KEY        = 'kct_v1';              // localStorage key for chart data
+const STORAGE_KEY        = 'kct_v2';              // localStorage key for chart data
 const STORAGE_COLLAPSE_KEY = 'kct_collapsed_v1'; // localStorage key for panel collapse
 
 const COLORS = {
@@ -904,10 +924,21 @@ function handleUpdate(status, seed = false, ts = Date.now()) {
 
 /** Collapse/expand the panel that owns the given toggle button. */
 function togglePanel(btn) {
-  const panel  = btn.closest('.panel');
-  const panelId = panel.dataset.panelId;
+  const panel     = btn.closest('.panel');
+  const panelId   = panel.dataset.panelId;
   const isCollapsed = panel.classList.toggle('panel--collapsed');
   if (panelId) savePanelCollapseState(panelId, isCollapsed);
+
+  // Keep the section-level Collapse/Expand All button label in sync.
+  const section = panel.closest('section');
+  if (section) {
+    const sectionBtn = section.querySelector('.section-collapse-btn');
+    if (sectionBtn) {
+      const panels = [...section.querySelectorAll('.panel[data-panel-id]')];
+      const anyExpanded = panels.some(p => !p.classList.contains('panel--collapsed'));
+      sectionBtn.textContent = anyExpanded ? 'Collapse All' : 'Expand All';
+    }
+  }
 }
 
 /** Persist a single panel's collapse state to localStorage. */
@@ -937,6 +968,40 @@ function restoreCollapseStates() {
   } catch {
     // Corrupt localStorage entry — ignore
   }
+  // Sync section-level button labels after restoring individual panel states.
+  syncSectionBtnLabels();
+}
+
+/** Sync every section's Collapse/Expand All button label with current panel states. */
+function syncSectionBtnLabels() {
+  document.querySelectorAll('section').forEach(section => {
+    const btn = section.querySelector('.section-collapse-btn');
+    if (!btn) return;
+    const panels = [...section.querySelectorAll('.panel[data-panel-id]')];
+    if (!panels.length) return;
+    const anyExpanded = panels.some(p => !p.classList.contains('panel--collapsed'));
+    btn.textContent = anyExpanded ? 'Collapse All' : 'Expand All';
+  });
+}
+
+/**
+ * Collapse or expand all panels inside the given section, and update the
+ * section-level button label to reflect the next available action.
+ * The action is determined by whether any panel in the section is currently
+ * expanded: if yes, collapse all; if all are already collapsed, expand all.
+ */
+function toggleSectionPanels(sectionId, btn) {
+  const section = document.getElementById(sectionId);
+  if (!section) return;
+  const panels = [...section.querySelectorAll('.panel[data-panel-id]')];
+  // Collapse if any panel is currently expanded; otherwise expand all.
+  const anyExpanded = panels.some(p => !p.classList.contains('panel--collapsed'));
+  const collapse = anyExpanded;
+  panels.forEach(panel => {
+    panel.classList.toggle('panel--collapsed', collapse);
+    if (panel.dataset.panelId) savePanelCollapseState(panel.dataset.panelId, collapse);
+  });
+  btn.textContent = collapse ? 'Expand All' : 'Collapse All';
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1121,12 +1186,12 @@ function createMcuPanel(name) {
       </div>
 
       <div class="chart-block">
-        <div class="chart-label">MCU Performance (10 s bucket avg)</div>
+        <div class="chart-label">MCU Performance (2 s bucket avg)</div>
         <div class="chart-wrap"><canvas id="mcu-perf-${id}"></canvas></div>
       </div>
 
       <div class="chart-block">
-        <div class="chart-label">Round-Trip Time (10 s bucket avg)</div>
+        <div class="chart-label">Round-Trip Time (2 s bucket avg)</div>
         <div class="chart-wrap"><canvas id="mcu-srtt-${id}"></canvas></div>
       </div>
     </div>
