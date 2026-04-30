@@ -1,0 +1,1791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Klipper Diagnostics</title>
+
+  <!-- Chart.js 4.x + date-fns adapter for time-series X axis -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+  <style>
+    /* ── Design tokens ────────────────────────────────────── */
+    :root {
+      --bg:      #0f0f1a;
+      --bg2:     #1a1a2e;
+      --bg3:     #16213e;
+      --border:  #2a2a4a;
+      --text:    #e0e0e0;
+      --muted:   #a0a0b0;
+      --green:   #00d4aa;
+      --blue:    #4d9de0;
+      --orange:  #f28c28;
+      --red:     #e74c3c;
+      --yellow:  #f1c40f;
+      --purple:  #9b59b6;
+    }
+
+    /* ── Reset ────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* ── Header ───────────────────────────────────────────── */
+    header {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    header h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--green);
+      white-space: nowrap;
+    }
+
+    .conn-form {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-left: auto;
+    }
+
+    .conn-form input[type="text"] {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 12px;
+      color: var(--text);
+      font-size: 0.85rem;
+      width: 230px;
+      outline: none;
+    }
+    .conn-form input[type="text"]:focus {
+      border-color: var(--blue);
+    }
+
+    button {
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      padding: 6px 14px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: var(--text);
+      transition: filter 0.15s;
+    }
+    button:hover { filter: brightness(1.25); }
+    #connect-btn    { background: #0f3460; }
+    #disconnect-btn { background: #6e1515; display: none; }
+
+    /* ── Status badge ─────────────────────────────────────── */
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .status::before {
+      content: '';
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .status.connected    { color: var(--green);  background: rgba(0,212,170,.12); }
+    .status.disconnected { color: var(--red);    background: rgba(231,76,60,.12); }
+    .status.connecting   { color: var(--yellow); background: rgba(241,196,15,.12); }
+
+    /* ── Main layout ──────────────────────────────────────── */
+    main { padding: 22px; max-width: 1700px; margin: 0 auto; }
+
+    section { margin-bottom: 30px; }
+
+    section > h2 {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      margin-bottom: 14px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .panels-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(580px, 1fr));
+      gap: 18px;
+      align-items: start;  /* panels take their own height — collapsed panels don't stretch */
+    }
+
+    /* ── Panel card ───────────────────────────────────────── */
+    .panel {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .panel-title {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    /* ── Stat badges row ──────────────────────────────────── */
+    .stats-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .sb {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 3px 9px;
+      font-size: 0.73rem;
+      line-height: 1.6;
+    }
+    .sb .lbl { color: var(--muted); margin-right: 3px; }
+    .sb .val { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .sb.ok   .val { color: var(--green); }
+    .sb.warn .val { color: var(--orange); }
+    .sb.err  .val { color: var(--red); }
+
+    /* ── Chart blocks ─────────────────────────────────────── */
+    .chart-block { margin-bottom: 14px; }
+    .chart-block:last-child { margin-bottom: 0; }
+
+    .chart-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 5px;
+    }
+
+    .chart-wrap {
+      position: relative;
+      height: 185px;
+    }
+
+    /* ── Bus state badge ──────────────────────────────────── */
+    .bus-state {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 0.73rem;
+      font-weight: 600;
+    }
+    .bus-state.active       { background: rgba(0,212,170,.18); color: var(--green); }
+    .bus-state.passive      { background: rgba(241,196,15,.18); color: var(--yellow); }
+    .bus-state.warn_passive { background: rgba(241,196,15,.18); color: var(--yellow); }
+    .bus-state.off          { background: rgba(231,76,60,.18);  color: var(--red); }
+    .bus-state.unknown      { background: rgba(160,160,176,.15); color: var(--muted); }
+
+    /* ── Empty / log panels ───────────────────────────────── */
+    #empty {
+      text-align: center;
+      padding: 70px 24px;
+      color: var(--muted);
+    }
+    #empty svg { opacity: .4; }
+    #empty p { margin-top: 10px; font-size: 0.875rem; }
+
+    #log {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: var(--muted);
+      max-height: 110px;
+      overflow-y: auto;
+      margin-top: 4px;
+      display: none;
+    }
+    .log-line         { margin-bottom: 1px; }
+    .log-line.err     { color: var(--red); }
+    .log-line.ok      { color: var(--green); }
+    .log-line.info    { color: var(--blue); }
+
+    /* ── History info pill ────────────────────────────────────── */
+    .history-info {
+      font-size: 0.7rem;
+      font-weight: 500;
+      color: var(--muted);
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 10px;
+      white-space: nowrap;
+    }
+
+    #clear-btn { background: #2a1a00; }
+    #clear-btn:hover { background: #4a3000; }
+
+    /* ── Tooltip ──────────────────────────────────────────────────── */
+    .tt {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 13px; height: 13px;
+      border-radius: 50%;
+      background: rgba(160,160,176,.15);
+      border: 1px solid rgba(160,160,176,.3);
+      color: var(--muted);
+      font-size: 0.58rem;
+      font-weight: 700;
+      cursor: help;
+      margin-left: 4px;
+      vertical-align: middle;
+      position: relative;
+      flex-shrink: 0;
+    }
+    .tt::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: #12122a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 11px;
+      font-size: 0.69rem;
+      line-height: 1.55;
+      color: var(--text);
+      width: 250px;
+      white-space: normal;
+      z-index: 300;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s;
+      text-align: left;
+      font-weight: normal;
+    }
+    .tt:hover::after { opacity: 1; }
+
+    /* ── Panel collapse ───────────────────────────────────────────── */
+    .collapse-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 2px 7px;
+      font-size: 0.72rem;
+      line-height: 1.4;
+      flex-shrink: 0;
+      transition: color 0.15s, transform 0.2s;
+    }
+    .collapse-btn:hover { color: var(--text); filter: none; }
+    .panel--collapsed .collapse-btn  { transform: rotate(-90deg); }
+    /* When collapsed: hide body, shrink panel to header-only height.
+       padding-bottom: 8px keeps a small symmetric margin below the header. */
+    .panel--collapsed .panel-body    { display: none; }
+    .panel--collapsed                { padding-bottom: 8px; }
+    .panel--collapsed .panel-header  { margin-bottom: 0; }
+
+    /* ── View toggle tabs ─────────────────────────────────────── */
+    .view-tabs {
+      display: flex;
+      gap: 4px;
+    }
+
+    .tab-btn {
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.82rem;
+      padding: 5px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .tab-btn:hover { filter: brightness(1.2); }
+    .tab-btn.active {
+      background: #0f3460;
+      border-color: var(--blue);
+      color: var(--blue);
+    }
+  </style>
+</head>
+
+<body>
+
+<!-- ═══════════════════════ HEADER ══════════════════════════ -->
+<header>
+  <h1>Klipper Diagnostics</h1>
+  <span class="history-info">10 s buckets · up to 12 h history</span>
+  <div class="view-tabs">
+    <button id="tab-device" class="tab-btn active" onclick="setView('device')">By Device</button>
+    <button id="tab-stat"   class="tab-btn"        onclick="setView('stat')">By Stat</button>
+  </div>
+  <div class="conn-form">
+    <input type="text" id="host-input" placeholder="Moonraker host (e.g. 192.168.1.100)"
+           onkeydown="if(event.key==='Enter')connect()" />
+    <button id="connect-btn"    onclick="connect()">Connect</button>
+    <button id="disconnect-btn" onclick="disconnect()">Disconnect</button>
+    <button id="clear-btn"      onclick="clearChartData()" style="display:none">Clear Data</button>
+    <span class="status disconnected" id="conn-status">Disconnected</span>
+  </div>
+</header>
+
+<!-- ═══════════════════════ MAIN ═════════════════════════════ -->
+<main>
+
+  <div id="empty">
+    <svg width="60" height="60" viewBox="0 0 24 24" fill="none"
+         stroke="currentColor" stroke-width="1.5">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <path d="M8 21h8M12 17v4M7 8h10M7 11h7"/>
+    </svg>
+    <p>Enter the Moonraker host and click <strong>Connect</strong> to start tracking.</p>
+  </div>
+
+  <!-- ── By-Device view ─────────────────────────────────────── -->
+  <div id="view-device">
+    <section id="host-section" style="display:none">
+      <h2>Host Load</h2>
+      <div class="panels-grid" id="host-panels"></div>
+    </section>
+
+    <section id="mcu-section" style="display:none">
+      <h2>MCU Statistics — By Device</h2>
+      <div class="panels-grid" id="mcu-panels"></div>
+    </section>
+
+    <section id="canbus-section" style="display:none">
+      <h2>CAN Bus Statistics — By Device</h2>
+      <div class="panels-grid" id="canbus-panels"></div>
+    </section>
+  </div>
+
+  <!-- ── By-Stat view ───────────────────────────────────────── -->
+  <div id="view-stat" style="display:none">
+    <section id="mcu-stat-section" style="display:none">
+      <h2>MCU Statistics — By Stat (all MCUs)</h2>
+      <div class="panels-grid" id="mcu-stat-panels"></div>
+    </section>
+
+    <section id="canbus-stat-section" style="display:none">
+      <h2>CAN Bus Statistics — By Stat (all interfaces)</h2>
+      <div class="panels-grid" id="canbus-stat-panels"></div>
+    </section>
+  </div>
+
+  <div id="log"></div>
+
+</main>
+
+<!-- ═══════════════════════ SCRIPT ═══════════════════════════ -->
+<script>
+'use strict';
+
+// ── Constants ────────────────────────────────────────────────
+// Bucket-based aggregation: raw values within each BUCKET_MS window are
+// aggregated before being stored — 'last' (most-recent sample) for cumulative
+// counters, 'avg' (mean) for level/rate values.
+// This keeps chart point counts manageable while retaining long history.
+const BUCKET_MS    = 10_000;                       // 10-second aggregation buckets
+const HISTORY_MS   = 12 * 60 * 60 * 1000;         // 12 h in ms — prune threshold
+const MAX_BUCKETS  = HISTORY_MS / BUCKET_MS;       // 4 320 points max per series
+const RPC_TIMEOUT_MS = 12_000;                     // JSON-RPC call timeout
+const MAX_LOG_LINES  = 120;                        // max lines kept in the log panel
+const STORAGE_KEY        = 'kct_v1';              // localStorage key for chart data
+const STORAGE_COLLAPSE_KEY = 'kct_collapsed_v1'; // localStorage key for panel collapse
+
+const COLORS = {
+  retransmit    : '#f28c28',
+  invalid       : '#e74c3c',
+  retransmit_seq: '#f1c40f',
+  write         : '#4d9de0',
+  read          : '#00d4aa',
+  awake         : '#9b59b6',
+  task_avg      : '#3498db',
+  task_stddev   : '#2980b9',
+  srtt          : '#00d4aa',
+  rto           : '#f28c28',
+  rx_err        : '#e74c3c',
+  tx_err        : '#f28c28',
+  tx_retry      : '#f1c40f',
+  cpu_load      : '#00d4aa',
+  mem_avail     : '#9b59b6',
+};
+
+// Color palette used for the "By Stat" multi-series charts (one color per device)
+const DEVICE_PALETTE = [
+  '#4d9de0', '#00d4aa', '#f28c28', '#e74c3c',
+  '#9b59b6', '#f1c40f', '#1abc9c', '#e67e22',
+  '#3498db', '#2ecc71', '#e91e63', '#00bcd4',
+];
+
+// Stat definitions for MCU and canbus — used to build the "By Stat" charts.
+// mode: 'last' for cumulative counters, 'avg' for level/rate values.
+// scale: optional function applied before storing (e.g. unit conversion).
+// title: human-readable panel/badge title.
+// tooltip: description shown when hovering the ? icon.
+const MCU_STAT_DEFS = [
+  {
+    key: 'bytes_retransmit', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Retransmit Bytes (bytes_retransmit)',
+    tooltip: 'Cumulative bytes retransmitted to the MCU because an acknowledgement was not received before the RTO timer expired (host→MCU direction). Any increase indicates packet loss — check USB cable quality, CPU load, and MCU power supply.',
+  },
+  {
+    key: 'bytes_invalid', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Invalid Bytes (bytes_invalid)',
+    tooltip: 'Cumulative bytes received from the MCU that were discarded — either because they failed the CRC check (bit errors caused by electrical noise or a defective cable) or because they arrived with an unexpected sequence number. Any non-zero value warrants investigation.',
+  },
+  {
+    key: 'retransmit_seq', yLabel: 'seq #', mode: 'last', scale: null,
+    title: 'Retransmit Seq (retransmit_seq)',
+    tooltip: 'The outgoing sequence number (send_seq) at the time of the most recent retransmit event. When this value changes, a retransmit just occurred. Use together with bytes_retransmit to assess link reliability.',
+  },
+  {
+    key: 'bytes_write', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Bytes Written (bytes_write)',
+    tooltip: 'Cumulative bytes sent from the Klipper host to the MCU since the process started. Monotonically increasing.',
+  },
+  {
+    key: 'bytes_read', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Bytes Read (bytes_read)',
+    tooltip: 'Cumulative bytes received by the Klipper host from the MCU since the process started. Monotonically increasing.',
+  },
+  {
+    key: 'mcu_awake', yLabel: '%', mode: 'avg', scale: v => v * 100,
+    title: 'MCU Awake % (mcu_awake)',
+    tooltip: 'Percentage of time the MCU spent outside its idle/sleep loop. Low values are normal. Sustained high values indicate the MCU is heavily loaded and may be unable to service all scheduled commands in time.',
+  },
+  {
+    key: 'mcu_task_avg', yLabel: 'µs', mode: 'avg', scale: v => v * 1e6,
+    title: 'MCU Task Avg (mcu_task_avg)',
+    tooltip: 'Average time in microseconds the MCU\'s internal task scheduler takes to process a single command. Reported by the MCU firmware. Higher values reduce available headroom for real-time scheduling.',
+  },
+  {
+    key: 'mcu_task_stddev', yLabel: 'µs', mode: 'avg', scale: v => v * 1e6,
+    title: 'MCU Task Stddev (mcu_task_stddev)',
+    tooltip: 'Standard deviation of the MCU task processing time in microseconds. A high standard deviation indicates inconsistent scheduling latency which can cause timing jitter in stepper or heater control.',
+  },
+];
+
+const CANBUS_STAT_DEFS = [
+  {
+    key: 'rx_error', yLabel: 'count', mode: 'last', scale: null,
+    title: 'RX Errors (rx_error)',
+    tooltip: 'Cumulative receive errors detected by the micro-controller CAN hardware. Increments on CRC errors, bit-stuffing errors, or framing errors on received frames.',
+  },
+  {
+    key: 'tx_error', yLabel: 'count', mode: 'last', scale: null,
+    title: 'TX Errors (tx_error)',
+    tooltip: 'Cumulative transmit errors detected by the micro-controller CAN hardware. Increments when a transmitted frame is not acknowledged by any node on the bus. High values indicate missing bus termination, an open circuit, or a disconnected device. Note: rp2040/rp2350 MCUs always report this as 0.',
+  },
+  {
+    key: 'tx_retries', yLabel: 'count', mode: 'last', scale: null,
+    title: 'TX Retries (tx_retries)',
+    tooltip: 'Number of CAN frame transmit attempts that were retried due to bus contention (arbitration loss) or transmission errors. Only reported as non-zero by rp2040/rp2350 micro-controllers; always 0 on other MCU types.',
+  },
+];
+
+// ── State ────────────────────────────────────────────────────
+let ws          = null;
+let msgId       = 1;
+let currentHost = null;     // host we last successfully initialised against
+
+const pending          = {};  // id → {resolve, reject}
+const mcuState         = {};  // name → {errChart, trafficChart, perfChart, srttChart, statsEl, b*}
+const canbusState      = {};  // name → {chart, statsEl, stateEl, b*}
+const hostState        = {};  // 'system_stats' → {chart, statsEl, bSysload, bMemAvail, last}
+const mcuStatCharts    = {};  // statKey → {chart, buckets:{mcuName→bucket}, def, dsIdx:{mcuName→int}}
+const canbusStatCharts = {};  // statKey → {chart, buckets:{canbusName→bucket}, def, dsIdx:{canbusName→int}}
+
+// ── Logging ──────────────────────────────────────────────────
+function log(msg, cls = '') {
+  const el = document.getElementById('log');
+  el.style.display = '';
+  const line = Object.assign(document.createElement('div'), {
+    className : 'log-line' + (cls ? ' ' + cls : ''),
+    textContent: `[${new Date().toLocaleTimeString()}]  ${msg}`,
+  });
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  if (el.children.length > MAX_LOG_LINES) el.children[0].remove();
+}
+
+// ── Connection helpers ────────────────────────────────────────
+function guessHost() {
+  const h = window.location.hostname;
+  if (!h || h === 'localhost' || h === '127.0.0.1') return '';
+  const p = window.location.port;
+  return h + (p && p !== '80' && p !== '443' ? ':' + p : '');
+}
+
+function wsUrl(host) {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${host}/websocket`;
+}
+
+function httpUrl(host) {
+  const proto = window.location.protocol === 'https:' ? 'https:' : 'http:';
+  return `${proto}//${host}`;
+}
+
+function setStatus(s) {
+  const el = document.getElementById('conn-status');
+  el.className = `status ${s}`;
+  el.textContent = s === 'connected' ? 'Connected'
+                 : s === 'connecting' ? 'Connecting…'
+                 : 'Disconnected';
+}
+
+function sendRpc(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = msgId++;
+    const timeoutId = setTimeout(() => {
+      if (pending[id]) { delete pending[id]; reject(new Error(`RPC timeout for "${method}"`)); }
+    }, RPC_TIMEOUT_MS);
+    pending[id] = {
+      resolve: (result) => { clearTimeout(timeoutId); resolve(result); },
+      reject:  (err)    => { clearTimeout(timeoutId); reject(err); },
+    };
+    const msg = { jsonrpc: '2.0', method, id };
+    if (params !== undefined) msg.params = params;
+    ws.send(JSON.stringify(msg));
+  });
+}
+
+// ── connect / disconnect ──────────────────────────────────────
+function connect() {
+  const input = document.getElementById('host-input');
+  const host  = (input.value.trim() || guessHost());
+  if (!host) { alert('Please enter the Moonraker host address.'); return; }
+  input.value = host;
+
+  // Switching to a different printer: discard old panels and history
+  if (currentHost !== null && host !== currentHost) {
+    clearPanels();
+  }
+
+  setStatus('connecting');
+  document.getElementById('connect-btn').style.display    = 'none';
+  document.getElementById('disconnect-btn').style.display = '';
+  document.getElementById('clear-btn').style.display      = '';
+  document.getElementById('empty').style.display          = 'none';
+
+  log(`Connecting to ${wsUrl(host)} …`);
+
+  ws = new WebSocket(wsUrl(host));
+
+  ws.onopen = () => {
+    currentHost = host;
+    setStatus('connected');
+    log('WebSocket connected.', 'ok');
+    initialise();
+  };
+
+  ws.onclose = (e) => {
+    setStatus('disconnected');
+    log(`Disconnected${e.reason ? ': ' + e.reason : '.'}`, 'err');
+    document.getElementById('connect-btn').style.display    = '';
+    document.getElementById('disconnect-btn').style.display = 'none';
+    // Intentionally leave clear-btn visible so the user can still clear the
+    // retained history while disconnected, and leave all chart data intact.
+  };
+
+  ws.onerror = () => log('WebSocket error.', 'err');
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    // JSON-RPC response
+    if (msg.id !== undefined && pending[msg.id]) {
+      if (msg.error) pending[msg.id].reject(new Error(msg.error.message || JSON.stringify(msg.error)));
+      else           pending[msg.id].resolve(msg.result);
+      delete pending[msg.id];
+      return;
+    }
+
+    // Subscription notification
+    // params[0] = status dict, params[1] = Klipper eventtime (ignored — we use Date.now())
+    if (msg.method === 'notify_status_update' && Array.isArray(msg.params)) {
+      handleUpdate(msg.params[0], false, Date.now());
+    }
+  };
+}
+
+function disconnect() {
+  if (ws) { ws.close(); ws = null; }
+}
+
+// ── View toggle ───────────────────────────────────────────────
+function setView(v) {
+  document.getElementById('view-device').style.display = v === 'device' ? '' : 'none';
+  document.getElementById('view-stat').style.display   = v === 'stat'   ? '' : 'none';
+  document.getElementById('tab-device').classList.toggle('active', v === 'device');
+  document.getElementById('tab-stat').classList.toggle('active', v === 'stat');
+}
+
+// ── Panel lifecycle ───────────────────────────────────────────
+/**
+ * Destroy all Chart.js instances, wipe state and DOM, reset tracked host.
+ * Only called when the user explicitly clears data or switches to a new host.
+ */
+function clearPanels() {
+  for (const s of Object.values(mcuState)) {
+    s.errChart.destroy();
+    s.trafficChart.destroy();
+    s.perfChart.destroy();
+    s.srttChart.destroy();
+  }
+  for (const s of Object.values(canbusState)) {
+    s.chart.destroy();
+  }
+  for (const s of Object.values(hostState)) {
+    s.chart.destroy();
+  }
+  for (const sc of Object.values(mcuStatCharts))    sc.chart.destroy();
+  for (const sc of Object.values(canbusStatCharts)) sc.chart.destroy();
+
+  for (const k of Object.keys(mcuState))         delete mcuState[k];
+  for (const k of Object.keys(canbusState))       delete canbusState[k];
+  for (const k of Object.keys(hostState))         delete hostState[k];
+  for (const k of Object.keys(mcuStatCharts))     delete mcuStatCharts[k];
+  for (const k of Object.keys(canbusStatCharts))  delete canbusStatCharts[k];
+
+  document.getElementById('host-panels').innerHTML          = '';
+  document.getElementById('mcu-panels').innerHTML           = '';
+  document.getElementById('canbus-panels').innerHTML        = '';
+  document.getElementById('mcu-stat-panels').innerHTML      = '';
+  document.getElementById('canbus-stat-panels').innerHTML   = '';
+
+  document.getElementById('host-section').style.display          = 'none';
+  document.getElementById('mcu-section').style.display           = 'none';
+  document.getElementById('canbus-section').style.display        = 'none';
+  document.getElementById('mcu-stat-section').style.display      = 'none';
+  document.getElementById('canbus-stat-section').style.display   = 'none';
+  currentHost = null;
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
+}
+
+/**
+ * Wipe only the chart series data and reset bucket accumulators,
+ * keeping panels and structure intact.  Useful mid-session.
+ */
+function clearChartData() {
+  // Per-device MCU charts
+  for (const s of Object.values(mcuState)) {
+    for (const chart of [s.errChart, s.trafficChart, s.perfChart, s.srttChart]) {
+      chart.data.datasets.forEach(d => { d.data = []; });
+      chart.update('none');
+    }
+    s.bRetransmit    = makeBuckets('last');
+    s.bInvalid       = makeBuckets('last');
+    s.bRetransmitSeq = makeBuckets('last');
+    s.bWrite         = makeBuckets('last');
+    s.bRead          = makeBuckets('last');
+    s.bAwake         = makeBuckets('avg');
+    s.bTaskAvg       = makeBuckets('avg');
+    s.bTaskStddev    = makeBuckets('avg');
+    s.bSrtt          = makeBuckets('avg');
+    s.bRto           = makeBuckets('avg');
+    s.last = {};
+  }
+  // Per-device canbus charts
+  for (const s of Object.values(canbusState)) {
+    s.chart.data.datasets.forEach(d => { d.data = []; });
+    s.chart.update('none');
+    s.bRxErr   = makeBuckets('last');
+    s.bTxErr   = makeBuckets('last');
+    s.bTxRetry = makeBuckets('last');
+    s.last = {};
+  }
+  // Host load chart
+  for (const s of Object.values(hostState)) {
+    s.chart.data.datasets.forEach(d => { d.data = []; });
+    s.chart.update('none');
+    s.bSysload  = makeBuckets('avg');
+    s.bMemAvail = makeBuckets('avg');
+    s.last = {};
+  }
+  // Stat-grouped MCU charts
+  for (const sc of Object.values(mcuStatCharts)) {
+    sc.chart.data.datasets.forEach(d => { d.data = []; });
+    sc.chart.update('none');
+    for (const name of Object.keys(sc.buckets)) {
+      sc.buckets[name] = makeBuckets(sc.def.mode);
+    }
+  }
+  // Stat-grouped canbus charts
+  for (const sc of Object.values(canbusStatCharts)) {
+    sc.chart.data.datasets.forEach(d => { d.data = []; });
+    sc.chart.update('none');
+    for (const name of Object.keys(sc.buckets)) {
+      sc.buckets[name] = makeBuckets(sc.def.mode);
+    }
+  }
+  log('Chart data cleared.', 'info');
+  // Also clear persisted storage so stale data is not restored on next reload
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
+}
+
+// ── Initialise: discover objects → create panels → subscribe ─
+async function initialise() {
+  // NOTE: do NOT call clearPanels() here — on reconnect we want to keep all
+  // accumulated chart history and simply resume feeding new data.
+  try {
+    const listRes = await sendRpc('printer.objects.list');
+    const objects = (listRes && listRes.objects) || [];
+    log(`Discovered ${objects.length} printer object(s).`);
+
+    const mcuObjs    = objects.filter(o => o === 'mcu' || o.startsWith('mcu '));
+    const canbusObjs = objects.filter(o => o.startsWith('canbus_stats'));
+    const hasHost    = objects.includes('system_stats');
+
+    log(`MCUs: ${mcuObjs.join(', ') || '(none)'}`);
+    log(`CAN interfaces: ${canbusObjs.join(', ') || '(none)'}`);
+
+    if (!mcuObjs.length && !canbusObjs.length && !hasHost) {
+      log('No MCU, canbus_stats, or system_stats objects found.', 'err');
+      return;
+    }
+
+    // Only create panels for objects we haven't seen before (preserves history
+    // for objects that were already tracked before a reconnect).
+    mcuObjs.forEach(n    => { if (!mcuState[n])    createMcuPanel(n);    });
+    canbusObjs.forEach(n => { if (!canbusState[n]) createCanbusPanel(n); });
+    if (hasHost && !hostState['system_stats']) createHostPanel();
+
+    // Stat-grouped charts are created once per session (same guard pattern).
+    if (mcuObjs.length    && !mcuStatCharts[MCU_STAT_DEFS[0].key])       createMcuStatCharts(mcuObjs);
+    if (canbusObjs.length && !canbusStatCharts[CANBUS_STAT_DEFS[0].key]) createCanbusStatCharts(canbusObjs);
+
+    if (hasHost)          document.getElementById('host-section').style.display        = '';
+    if (mcuObjs.length) {
+      document.getElementById('mcu-section').style.display     = '';
+      document.getElementById('mcu-stat-section').style.display = '';
+    }
+    if (canbusObjs.length) {
+      document.getElementById('canbus-section').style.display     = '';
+      document.getElementById('canbus-stat-section').style.display = '';
+    }
+
+    // Restore persisted history before subscribing so charts are pre-populated.
+    restoreFromLocalStorage();
+    restoreCollapseStates();
+
+    // Build subscription request – null means subscribe to all fields
+    const subObjects = {};
+    if (hasHost) subObjects['system_stats'] = null;
+    mcuObjs.forEach(o    => { subObjects[o] = null; });
+    canbusObjs.forEach(o => { subObjects[o] = null; });
+
+    const subRes = await sendRpc('printer.objects.subscribe', { objects: subObjects });
+    log('Subscribed to object updates.', 'ok');
+
+    // Process the status snapshot from the subscribe response immediately so
+    // charts have baseline values before the first live update arrives.
+    if (subRes && subRes.status) {
+      handleUpdate(subRes.status, true, Date.now());
+    }
+
+    // Fetch a full snapshot via HTTP to pre-populate fields that Moonraker omits
+    // from subscribe/notify when their value almost never changes.
+    try {
+      const qs  = Object.keys(subObjects).map(k => encodeURIComponent(k)).join('&');
+      const url = `${httpUrl(currentHost)}/printer/objects/query?${qs}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} — check that Moonraker is running and CORS is allowed`);
+      const json = await res.json();
+      if (json && json.result && json.result.status) {
+        handleUpdate(json.result.status, true, Date.now());
+      }
+    } catch (queryError) {
+      log(`Initial HTTP snapshot failed (non-fatal): ${queryError.message}`, 'warn');
+    }
+  } catch (e) {
+    log(`Connection setup failed: ${e.message}`, 'err');
+  }
+}
+
+// ── Status update router ──────────────────────────────────────
+function handleUpdate(status, seed = false, ts = Date.now()) {
+  for (const [name, data] of Object.entries(status)) {
+    if (name === 'mcu' || name.startsWith('mcu ')) {
+      if (data.last_stats && mcuState[name]) onMcuData(name, data.last_stats, ts, seed);
+    } else if (name.startsWith('canbus_stats')) {
+      if (canbusState[name]) onCanbusData(name, data, ts, seed);
+    } else if (name === 'system_stats') {
+      onHostData(data, ts, seed);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Collapsible panel helpers
+// ═══════════════════════════════════════════════════════════════
+
+/** Collapse/expand the panel that owns the given toggle button. */
+function togglePanel(btn) {
+  const panel  = btn.closest('.panel');
+  const panelId = panel.dataset.panelId;
+  const isCollapsed = panel.classList.toggle('panel--collapsed');
+  if (panelId) savePanelCollapseState(panelId, isCollapsed);
+}
+
+/** Persist a single panel's collapse state to localStorage. */
+function savePanelCollapseState(panelId, collapsed) {
+  try {
+    const raw   = localStorage.getItem(STORAGE_COLLAPSE_KEY);
+    const ids   = new Set(raw ? JSON.parse(raw) : []);
+    if (collapsed) ids.add(panelId);
+    else           ids.delete(panelId);
+    localStorage.setItem(STORAGE_COLLAPSE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // localStorage unavailable — non-fatal
+  }
+}
+
+/** Apply stored collapse states to all panels in the document. */
+function restoreCollapseStates() {
+  try {
+    const raw = localStorage.getItem(STORAGE_COLLAPSE_KEY);
+    if (!raw) return;
+    const ids = new Set(JSON.parse(raw));
+    document.querySelectorAll('.panel[data-panel-id]').forEach(panel => {
+      if (ids.has(panel.dataset.panelId)) {
+        panel.classList.add('panel--collapsed');
+      }
+    });
+  } catch {
+    // Corrupt localStorage entry — ignore
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Chart helpers
+// ═══════════════════════════════════════════════════════════════
+
+const BASE_SCALE_X = {
+  type  : 'time',
+  time  : {
+    // Chart.js auto-picks the right unit; provide readable formats for each level
+    displayFormats: {
+      second     : 'HH:mm:ss',
+      minute     : 'HH:mm',
+      hour       : 'HH:mm',
+    },
+  },
+  ticks : { color: '#a0a0b0', font: { size: 10 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+  grid  : { color: '#2a2a4a' },
+};
+
+const BASE_SCALE_Y = {
+  beginAtZero: true,
+  ticks: { color: '#a0a0b0', font: { size: 10 } },
+  grid : { color: '#2a2a4a' },
+};
+
+function ds(label, color, dashed = false, yAxisID = 'y') {
+  return {
+    label, yAxisID,
+    data: [],
+    borderColor     : color,
+    backgroundColor : color + '18',
+    borderWidth     : dashed ? 1.5 : 2,
+    borderDash      : dashed ? [5, 4] : [],
+    tension         : 0.3,
+    fill            : false,
+    pointRadius     : 0,
+    pointHoverRadius: 4,
+  };
+}
+
+function makeChart(ctx, datasets, scales) {
+  return new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      animation   : false,
+      responsive  : true,
+      maintainAspectRatio: false,
+      interaction : { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#a0a0b0', font: { size: 11 }, boxWidth: 14, padding: 10 } },
+      },
+      scales,
+    },
+  });
+}
+
+// ── Bucket aggregation helpers ────────────────────────────────
+/**
+ * Create a bucket-series accumulator.
+ * @param {'last'|'avg'|'sum'} mode
+ *   'last' – emit the most-recent sample in the window (best for cumulative counters)
+ *   'avg'  – emit the mean of samples (best for level/rate values)
+ *   'sum'  – emit the sum of samples (legacy, kept for completeness)
+ */
+function makeBuckets(mode = 'last') {
+  return { mode, bucketEnd: 0, acc: 0, count: 0, lastEmitted: 0 };
+}
+
+/**
+ * Feed one raw value into a bucket accumulator.
+ * Returns an array of {x, y} points for every bucket that just completed.
+ */
+function feedBuckets(b, ts, value) {
+  const pts = [];
+
+  if (b.bucketEnd === 0) {
+    // Align the first bucket end to the next BUCKET_MS boundary
+    b.bucketEnd = (Math.floor(ts / BUCKET_MS) + 1) * BUCKET_MS;
+  }
+
+  // Flush every completed bucket before accumulating the new sample
+  while (ts >= b.bucketEnd) {
+    let y;
+    if (b.count === 0) {
+      y = b.lastEmitted; // no samples this bucket: carry forward last known value
+    } else if (b.mode === 'avg') {
+      y = b.acc / b.count;
+    } else if (b.mode === 'sum') {
+      y = b.acc;
+    } else { // 'last': b.acc holds the most-recent value seen this bucket
+      y = b.acc;
+    }
+    b.lastEmitted = y;
+    pts.push({ x: b.bucketEnd - BUCKET_MS, y }); // x = bucket start timestamp
+    b.bucketEnd += BUCKET_MS;
+    b.acc   = 0;
+    b.count = 0;
+  }
+
+  // Accumulate into the current (open) bucket
+  if (b.mode === 'last') {
+    b.acc = value; // overwrite — keep only the most recent sample
+  } else {
+    b.acc += value;
+  }
+  b.count++;
+  return pts;
+}
+
+/**
+ * Feed a raw value, push any completed bucket points into the chart dataset,
+ * and trim to MAX_BUCKETS.  Returns true when at least one point was added.
+ * Monotonic guard: points that would go backward (x ≤ last point's x) are skipped.
+ */
+function pushBucketed(chart, dsIdx, b, ts, value) {
+  const pts = feedBuckets(b, ts, value);
+  if (!pts.length) return false;
+  const data = chart.data.datasets[dsIdx].data;
+  let added = false;
+  for (const p of pts) {
+    // Never add a point that goes backward or duplicate timestamps
+    if (!data.length || p.x > data[data.length - 1].x) {
+      data.push(p);
+      added = true;
+    }
+  }
+  while (data.length > MAX_BUCKETS) data.shift();
+  return added;
+}
+
+/**
+ * Immediately emit a snapshot point at ts without waiting for a bucket to close.
+ * Always advances b.bucketEnd to the next boundary ≥ ts so that subsequent
+ * feedBuckets calls start from ts, not from a stale restored value.
+ * Monotonic guard: skips the push if ts ≤ last point's x.
+ */
+function seedChart(chart, dsIdx, b, ts, value) {
+  // Always advance bucketEnd — critical when b.bucketEnd was restored from
+  // localStorage (which would be in the past), as leaving it stale would cause
+  // feedBuckets to emit phantom backward-dated carry-forward points.
+  b.bucketEnd = (Math.floor(ts / BUCKET_MS) + 1) * BUCKET_MS;
+  b.lastEmitted = value;
+  const data = chart.data.datasets[dsIdx].data;
+  // Monotonic guard: never push a point before or at the last existing point
+  if (!data.length || ts > data[data.length - 1].x) {
+    data.push({ x: ts, y: value });
+    while (data.length > MAX_BUCKETS) data.shift();
+  }
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MCU panel (by device)
+// ═══════════════════════════════════════════════════════════════
+
+function createMcuPanel(name) {
+  const id      = safeId(name);
+  const label   = name === 'mcu' ? 'Main MCU' : 'MCU: ' + name.replace('mcu ', '');
+  const panelId = `mcu-${id}`;
+
+  const el = document.createElement('div');
+  el.className = 'panel';
+  el.dataset.panelId = panelId;
+  el.innerHTML = `
+    <div class="panel-header">
+      <div class="panel-title">⚡ ${label}</div>
+      <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
+    </div>
+    <div class="panel-body">
+      <div class="stats-row" id="mcu-stats-${id}"></div>
+
+      <div class="chart-block">
+        <div class="chart-label">Communication Errors (cumulative)</div>
+        <div class="chart-wrap"><canvas id="mcu-err-${id}"></canvas></div>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-label">Communication Traffic (cumulative bytes)</div>
+        <div class="chart-wrap"><canvas id="mcu-traffic-${id}"></canvas></div>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-label">MCU Performance (10 s bucket avg)</div>
+        <div class="chart-wrap"><canvas id="mcu-perf-${id}"></canvas></div>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-label">Round-Trip Time (10 s bucket avg)</div>
+        <div class="chart-wrap"><canvas id="mcu-srtt-${id}"></canvas></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('mcu-panels').appendChild(el);
+
+  // Error chart: cumulative retransmit bytes / invalid bytes / retransmit_seq
+  const errChart = makeChart(
+    document.getElementById(`mcu-err-${id}`).getContext('2d'),
+    [
+      ds('Retransmit bytes', COLORS.retransmit),
+      ds('Invalid bytes',    COLORS.invalid),
+      ds('Retransmit seqs',  COLORS.retransmit_seq, true),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'bytes / seqs', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
+  // Traffic chart: cumulative bytes written / read
+  const trafficChart = makeChart(
+    document.getElementById(`mcu-traffic-${id}`).getContext('2d'),
+    [
+      ds('Bytes written', COLORS.write),
+      ds('Bytes read',    COLORS.read),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'bytes', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
+  // Performance chart: mcu_awake (%) on left Y, task timing (µs) on right Y
+  const perfChart = makeChart(
+    document.getElementById(`mcu-perf-${id}`).getContext('2d'),
+    [
+      ds('MCU awake %',    COLORS.awake,       false, 'y'),
+      ds('Task avg µs',    COLORS.task_avg,    true,  'y1'),
+      ds('Task stddev µs', COLORS.task_stddev, true,  'y1'),
+    ],
+    {
+      x  : BASE_SCALE_X,
+      y  : {
+        ...BASE_SCALE_Y,
+        position: 'left',
+        max: 100,
+        title: { display: true, text: '%', color: '#a0a0b0', font: { size: 10 } },
+      },
+      y1 : {
+        ...BASE_SCALE_Y,
+        position: 'right',
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: 'µs', color: '#a0a0b0', font: { size: 10 } },
+      },
+    },
+  );
+
+  // SRTT / RTO chart
+  const srttChart = makeChart(
+    document.getElementById(`mcu-srtt-${id}`).getContext('2d'),
+    [
+      ds('SRTT ms', COLORS.srtt),
+      ds('RTO ms',  COLORS.rto,  true),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'ms', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
+  mcuState[name] = {
+    errChart, trafficChart, perfChart, srttChart,
+    statsEl: document.getElementById(`mcu-stats-${id}`),
+    last   : {},  // last-known values — only updated when a field is present in an update
+    // Bucket accumulators — 'last' for cumulative counters, 'avg' for levels/rates
+    bRetransmit    : makeBuckets('last'),
+    bInvalid       : makeBuckets('last'),
+    bRetransmitSeq : makeBuckets('last'),
+    bWrite         : makeBuckets('last'),
+    bRead          : makeBuckets('last'),
+    bAwake         : makeBuckets('avg'),
+    bTaskAvg       : makeBuckets('avg'),
+    bTaskStddev    : makeBuckets('avg'),
+    bSrtt          : makeBuckets('avg'),
+    bRto           : makeBuckets('avg'),
+  };
+}
+
+function onMcuData(name, stats, ts, seed = false) {
+  const s = mcuState[name];
+
+  // Merge only the fields that are actually present in this (possibly partial) update.
+  // Fields omitted by Moonraker haven't changed — we keep the previous known value.
+  for (const [k, v] of Object.entries(stats)) {
+    if (v !== undefined && v !== null) s.last[k] = v;
+  }
+  const L = s.last; // convenience alias
+
+  // ── Stat badges ───────────────────────────────────────────
+  const retransmitBytes = L.bytes_retransmit ?? 0;
+  const invalidBytes    = L.bytes_invalid    ?? 0;
+  const srttDisplay = L.srtt != null ? (L.srtt * 1000).toFixed(3) + ' ms' : '—';
+  const rtoDisplay  = L.rto  != null ? (L.rto  * 1000).toFixed(1) + ' ms' : '—';
+
+  s.statsEl.innerHTML =
+    sb('Bytes written',     fmtBytes(L.bytes_write ?? 0), '',
+       'Cumulative bytes sent from the Klipper host to this MCU since the process started.') +
+    sb('Bytes read',        fmtBytes(L.bytes_read  ?? 0), '',
+       'Cumulative bytes received by the Klipper host from this MCU since the process started.') +
+    sb('Retransmit bytes',  retransmitBytes, retransmitBytes > 0 ? 'warn' : 'ok',
+       'Cumulative bytes retransmitted to the MCU because an acknowledgement was not received before the RTO timer expired. Any increase indicates packet loss on the link — check USB/UART cable quality, CPU load, and MCU power supply.') +
+    sb('Invalid bytes',     invalidBytes, invalidBytes > 0 ? 'err' : 'ok',
+       'Cumulative bytes received from the MCU that were discarded — either due to a CRC failure (bit errors caused by noise or a defective cable) or an unexpected sequence number. Any non-zero value warrants investigation.') +
+    sb('Send seq',          L.send_seq    ?? '—', '',
+       'Current outgoing message sequence number (host → MCU). Monotonically increasing (wraps at the 16-bit boundary); used to detect dropped messages.') +
+    sb('Receive seq',       L.receive_seq ?? '—', '',
+       'Expected incoming sequence number from the MCU. A sustained gap versus send_seq indicates unacknowledged messages.') +
+    sb('SRTT',              srttDisplay, '',
+       'Smoothed Round-Trip Time (RFC 6298) — exponential moving average of message acknowledgement latency. Calculated from the time a message is sent to when its ACK is received. Higher values mean more host↔MCU latency.') +
+    sb('RTO',               rtoDisplay, '',
+       'Retransmission Timeout — interval after which an unacknowledged message is resent. Derived from SRTT + 4×RTTVAR (RFC 6298). Clamped to 25 ms – 5 s by Klipper.');
+
+  // Choose between immediate seed point and normal bucketed accumulation.
+  const applyChart = seed
+    ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
+    : (chart, dsIdx, b, val) => pushBucketed(chart, dsIdx, b, ts, val);
+
+  // ── Per-device charts — only feed when the field arrived in this update ───
+  let dirty = false;
+
+  // Error chart
+  if (stats.bytes_retransmit !== undefined) dirty |= applyChart(s.errChart, 0, s.bRetransmit,    L.bytes_retransmit);
+  if (stats.bytes_invalid    !== undefined) dirty |= applyChart(s.errChart, 1, s.bInvalid,       L.bytes_invalid);
+  if (stats.retransmit_seq   !== undefined) dirty |= applyChart(s.errChart, 2, s.bRetransmitSeq, L.retransmit_seq);
+  if (dirty) s.errChart.update('none');
+
+  // Traffic chart
+  dirty = false;
+  if (stats.bytes_write !== undefined) dirty |= applyChart(s.trafficChart, 0, s.bWrite, L.bytes_write);
+  if (stats.bytes_read  !== undefined) dirty |= applyChart(s.trafficChart, 1, s.bRead,  L.bytes_read);
+  if (dirty) s.trafficChart.update('none');
+
+  // Performance chart
+  dirty = false;
+  if (stats.mcu_awake       !== undefined) dirty |= applyChart(s.perfChart, 0, s.bAwake,      L.mcu_awake       * 100);
+  if (stats.mcu_task_avg    !== undefined) dirty |= applyChart(s.perfChart, 1, s.bTaskAvg,    L.mcu_task_avg    * 1e6);
+  if (stats.mcu_task_stddev !== undefined) dirty |= applyChart(s.perfChart, 2, s.bTaskStddev, L.mcu_task_stddev * 1e6);
+  if (dirty) s.perfChart.update('none');
+
+  // SRTT / RTO chart
+  dirty = false;
+  if (stats.srtt !== undefined && L.srtt != null) dirty |= applyChart(s.srttChart, 0, s.bSrtt, L.srtt * 1000);
+  if (stats.rto  !== undefined && L.rto  != null) dirty |= applyChart(s.srttChart, 1, s.bRto,  L.rto  * 1000);
+  if (dirty) s.srttChart.update('none');
+
+  // ── Stat-grouped charts ───────────────────────────────────
+  for (const def of MCU_STAT_DEFS) {
+    if (stats[def.key] === undefined) continue; // field absent in this update — skip
+    const sc = mcuStatCharts[def.key];
+    if (!sc) continue;
+    const dsIdx = sc.dsIdx[name];
+    if (dsIdx === undefined) continue;
+    const val = def.scale ? def.scale(L[def.key]) : L[def.key];
+    if (applyChart(sc.chart, dsIdx, sc.buckets[name], val)) {
+      sc.chart.update('none');
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  CAN bus panel (by device)
+// ═══════════════════════════════════════════════════════════════
+
+function createCanbusPanel(name) {
+  const id      = safeId(name);
+  const label   = name.replace('canbus_stats ', '');
+  const panelId = `can-${id}`;
+
+  const el = document.createElement('div');
+  el.className = 'panel';
+  el.dataset.panelId = panelId;
+  el.innerHTML = `
+    <div class="panel-header">
+      <div class="panel-title">🔗 CAN: ${label}</div>
+      <span class="bus-state unknown" id="can-state-${id}">unknown</span>
+      <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
+    </div>
+    <div class="panel-body">
+      <div class="stats-row" id="can-stats-${id}"></div>
+
+      <div class="chart-block">
+        <div class="chart-label">Errors &amp; Retries (cumulative)</div>
+        <div class="chart-wrap"><canvas id="can-chart-${id}"></canvas></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('canbus-panels').appendChild(el);
+
+  const chart = makeChart(
+    document.getElementById(`can-chart-${id}`).getContext('2d'),
+    [
+      ds('RX errors',   COLORS.rx_err),
+      ds('TX errors',   COLORS.tx_err),
+      ds('TX retries',  COLORS.tx_retry, true),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'count', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
+  canbusState[name] = {
+    chart,
+    statsEl: document.getElementById(`can-stats-${id}`),
+    stateEl: document.getElementById(`can-state-${id}`),
+    last   : {},  // last-known values — only updated when a field is present in an update
+    // Bucket accumulators — 'last' for cumulative counters
+    bRxErr  : makeBuckets('last'),
+    bTxErr  : makeBuckets('last'),
+    bTxRetry: makeBuckets('last'),
+  };
+}
+
+function onCanbusData(name, data, ts, seed = false) {
+  const s = canbusState[name];
+
+  // Merge only the fields that are actually present in this (possibly partial) update.
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== undefined && v !== null) s.last[k] = v;
+  }
+  const L = s.last;
+
+  // ── Bus state badge ───────────────────────────────────────
+  if (data.bus_state !== undefined) {
+    const state = L.bus_state.replace(/\s+/g, '_').toLowerCase();
+    s.stateEl.textContent = L.bus_state;
+    s.stateEl.className   = `bus-state ${state}`;
+  }
+
+  // ── Stat badges ───────────────────────────────────────────
+  const rxErrors  = L.rx_error   ?? 0;
+  const txErrors  = L.tx_error   ?? 0;
+  const txRetries = L.tx_retries ?? 0;
+
+  s.statsEl.innerHTML =
+    sb('RX errors',   rxErrors,  rxErrors  > 0 ? 'warn' : 'ok',
+       'Cumulative receive errors detected by the MCU CAN hardware. Increments on CRC errors, bit-stuffing errors, or framing errors on received frames.') +
+    sb('TX errors',   txErrors,  txErrors  > 0 ? 'warn' : 'ok',
+       'Cumulative transmit errors detected by the MCU CAN hardware. Increments when a transmitted frame receives no acknowledgement from any bus node. High values indicate missing termination or a disconnected device. Note: rp2040/rp2350 MCUs always report 0 here.') +
+    sb('TX retries',  txRetries, txRetries > 0 ? 'warn' : 'ok',
+       'Number of CAN frame transmit attempts retried due to bus contention (arbitration loss) or errors. Only non-zero on rp2040/rp2350 micro-controllers; always 0 on other MCU types.');
+
+  const applyChart = seed
+    ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
+    : (chart, dsIdx, b, val) => pushBucketed(chart, dsIdx, b, ts, val);
+
+  // ── Per-device chart — only feed when the field arrived in this update ────
+  let dirty = false;
+  if (data.rx_error   !== undefined) dirty |= applyChart(s.chart, 0, s.bRxErr,   rxErrors);
+  if (data.tx_error   !== undefined) dirty |= applyChart(s.chart, 1, s.bTxErr,   txErrors);
+  if (data.tx_retries !== undefined) dirty |= applyChart(s.chart, 2, s.bTxRetry, txRetries);
+  if (dirty) s.chart.update('none');
+
+  // ── Stat-grouped charts ───────────────────────────────────
+  for (const def of CANBUS_STAT_DEFS) {
+    if (data[def.key] === undefined) continue; // field absent in this update — skip
+    const sc = canbusStatCharts[def.key];
+    if (!sc) continue;
+    const dsIdx = sc.dsIdx[name];
+    if (dsIdx === undefined) continue;
+    const val = def.scale ? def.scale(L[def.key]) : L[def.key];
+    if (applyChart(sc.chart, dsIdx, sc.buckets[name], val)) {
+      sc.chart.update('none');
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Host load panel (system_stats)
+// ═══════════════════════════════════════════════════════════════
+
+function createHostPanel() {
+  const el = document.createElement('div');
+  el.className = 'panel';
+  el.dataset.panelId = 'host';
+  el.innerHTML = `
+    <div class="panel-header">
+      <div class="panel-title">🖥️ Host Load</div>
+      <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
+    </div>
+    <div class="panel-body">
+      <div class="stats-row" id="host-stats"></div>
+
+      <div class="chart-block">
+        <div class="chart-label">CPU Load &amp; Available Memory</div>
+        <div class="chart-wrap"><canvas id="host-chart"></canvas></div>
+      </div>
+    </div>
+  `;
+  document.getElementById('host-panels').appendChild(el);
+
+  const chart = makeChart(
+    document.getElementById('host-chart').getContext('2d'),
+    [
+      ds('System load',  COLORS.cpu_load,  false, 'y'),
+      ds('Mem avail (MB)', COLORS.mem_avail, true,  'y1'),
+    ],
+    {
+      x  : BASE_SCALE_X,
+      y  : {
+        ...BASE_SCALE_Y,
+        position: 'left',
+        title: { display: true, text: 'load', color: '#a0a0b0', font: { size: 10 } },
+      },
+      y1 : {
+        ...BASE_SCALE_Y,
+        position: 'right',
+        grid: { drawOnChartArea: false },
+        title: { display: true, text: 'MB', color: '#a0a0b0', font: { size: 10 } },
+      },
+    },
+  );
+
+  hostState['system_stats'] = {
+    chart,
+    statsEl  : document.getElementById('host-stats'),
+    last     : {},
+    bSysload : makeBuckets('avg'),
+    bMemAvail: makeBuckets('avg'),
+  };
+}
+
+function onHostData(data, ts, seed = false) {
+  const s = hostState['system_stats'];
+  if (!s) return;
+
+  // Merge only present fields into the last-known cache.
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== undefined && v !== null) s.last[k] = v;
+  }
+  const L = s.last;
+
+  // ── Stat badges ───────────────────────────────────────────
+  const sysloadDisplay  = L.sysload  != null ? L.sysload.toFixed(2)                     : '—';
+  const memavailDisplay = L.memavail != null ? fmtBytes(L.memavail * 1024) + ' avail'   : '—';
+  const cputimeDisplay  = L.cputime  != null ? L.cputime.toFixed(1) + ' s'              : '—';
+
+  s.statsEl.innerHTML =
+    sb('System load',  sysloadDisplay, '',
+       'Linux 1-minute load average from /proc/loadavg. Values above the number of CPU cores indicate the system is overloaded.') +
+    sb('Memory avail', memavailDisplay, '',
+       'Available memory in kB from /proc/meminfo MemAvailable — memory the OS can allocate without swapping.') +
+    sb('CPU time',     cputimeDisplay, '',
+       'Cumulative CPU time consumed by the Klipper process since start (seconds), from /proc/PID/stat.');
+
+  const applyChart = seed
+    ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
+    : (chart, dsIdx, b, val) => pushBucketed(chart, dsIdx, b, ts, val);
+
+  // ── Chart — only feed when the field arrived in this update ──
+  let dirty = false;
+  if (data.sysload  !== undefined) dirty |= applyChart(s.chart, 0, s.bSysload,  L.sysload);
+  if (data.memavail !== undefined) dirty |= applyChart(s.chart, 1, s.bMemAvail, L.memavail / 1024); // kB → MB
+  if (dirty) s.chart.update('none');
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Stat-grouped panels ("By Stat" view)
+// ═══════════════════════════════════════════════════════════════
+
+function createMcuStatCharts(mcuObjs) {
+  for (const def of MCU_STAT_DEFS) {
+    const panelId = `mcu-stat-${def.key}`;
+    const panelEl = document.createElement('div');
+    panelEl.className = 'panel';
+    panelEl.dataset.panelId = panelId;
+    const ttHtml = def.tooltip
+      ? `<span class="tt" data-tip="${htmlEscape(def.tooltip)}">?</span>`
+      : '';
+    panelEl.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">📊 ${def.title}${ttHtml}</div>
+        <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
+      </div>
+      <div class="panel-body">
+        <div class="chart-block">
+          <div class="chart-wrap"><canvas id="mcu-stat-chart-${def.key}"></canvas></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('mcu-stat-panels').appendChild(panelEl);
+
+    const datasets = mcuObjs.map((name, i) => {
+      const label = name === 'mcu' ? 'Main MCU' : name.replace('mcu ', '');
+      return ds(label, DEVICE_PALETTE[i % DEVICE_PALETTE.length]);
+    });
+
+    const chart = makeChart(
+      document.getElementById(`mcu-stat-chart-${def.key}`).getContext('2d'),
+      datasets,
+      {
+        x: BASE_SCALE_X,
+        y: { ...BASE_SCALE_Y, title: { display: true, text: def.yLabel, color: '#a0a0b0', font: { size: 10 } } },
+      },
+    );
+
+    const buckets = {};
+    const dsIdx   = {};
+    mcuObjs.forEach((name, i) => {
+      buckets[name] = makeBuckets(def.mode);
+      dsIdx[name]   = i;
+    });
+
+    mcuStatCharts[def.key] = { chart, buckets, dsIdx, def };
+  }
+}
+
+function createCanbusStatCharts(canbusObjs) {
+  for (const def of CANBUS_STAT_DEFS) {
+    const panelId = `can-stat-${def.key}`;
+    const panelEl = document.createElement('div');
+    panelEl.className = 'panel';
+    panelEl.dataset.panelId = panelId;
+    const ttHtml = def.tooltip
+      ? `<span class="tt" data-tip="${htmlEscape(def.tooltip)}">?</span>`
+      : '';
+    panelEl.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">📊 ${def.title}${ttHtml}</div>
+        <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
+      </div>
+      <div class="panel-body">
+        <div class="chart-block">
+          <div class="chart-wrap"><canvas id="can-stat-chart-${def.key}"></canvas></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('canbus-stat-panels').appendChild(panelEl);
+
+    const datasets = canbusObjs.map((name, i) => {
+      const label = name.replace('canbus_stats ', '');
+      return ds(label, DEVICE_PALETTE[i % DEVICE_PALETTE.length]);
+    });
+
+    const chart = makeChart(
+      document.getElementById(`can-stat-chart-${def.key}`).getContext('2d'),
+      datasets,
+      {
+        x: BASE_SCALE_X,
+        y: { ...BASE_SCALE_Y, title: { display: true, text: def.yLabel, color: '#a0a0b0', font: { size: 10 } } },
+      },
+    );
+
+    const buckets = {};
+    const dsIdx   = {};
+    canbusObjs.forEach((name, i) => {
+      buckets[name] = makeBuckets(def.mode);
+      dsIdx[name]   = i;
+    });
+
+    canbusStatCharts[def.key] = { chart, buckets, dsIdx, def };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Utility functions
+// ═══════════════════════════════════════════════════════════════
+
+/** Convert an object name to a CSS-safe id fragment. */
+function safeId(name) {
+  return name.replace(/[^a-zA-Z0-9]/g, '_');
+}
+
+/** Format byte counts as human-readable strings. */
+function fmtBytes(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + ' MB';
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+/** Escape a string for safe use inside an HTML attribute value. */
+function htmlEscape(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Build a stat badge HTML string.
+ * @param {string} label     - Human-readable label shown on the badge.
+ * @param {*}      value     - Formatted value to display.
+ * @param {string} cls       - Optional extra CSS class ('ok' | 'warn' | 'err').
+ * @param {string} tooltip   - Optional tooltip text shown on hover.
+ */
+function sb(label, value, cls = '', tooltip = '') {
+  const ttHtml = tooltip
+    ? `<span class="tt" data-tip="${htmlEscape(tooltip)}">?</span>`
+    : '';
+  return `<span class="sb ${cls}"><span class="lbl">${label}${ttHtml}:</span><span class="val">${value}</span></span>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  LocalStorage persistence
+// ═══════════════════════════════════════════════════════════════
+
+/** Filter out data points older than the 12-hour history window. */
+function pruneOldPoints(points) {
+  const cutoff = Date.now() - HISTORY_MS;
+  return points.filter(p => p.x >= cutoff);
+}
+
+/**
+ * Serialise all chart data + bucket state + last-known values to localStorage.
+ * Old data is pruned before saving so the entry does not grow unboundedly.
+ * Silently handles QuotaExceededError by logging a warning.
+ */
+function saveToLocalStorage() {
+  if (!currentHost) return;
+
+  const state = {
+    version   : 1,
+    host      : currentHost,
+    savedAt   : Date.now(),
+    mcuPanels    : {},
+    canbusPanels : {},
+    hostPanel    : null,
+    mcuStatData  : {},
+    canbusStatData: {},
+  };
+
+  for (const [name, s] of Object.entries(mcuState)) {
+    state.mcuPanels[name] = {
+      last       : s.last,
+      errData    : s.errChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      trafficData: s.trafficChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      perfData   : s.perfChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      srttData   : s.srttChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets    : {
+        bRetransmit   : s.bRetransmit,
+        bInvalid      : s.bInvalid,
+        bRetransmitSeq: s.bRetransmitSeq,
+        bWrite        : s.bWrite,
+        bRead         : s.bRead,
+        bAwake        : s.bAwake,
+        bTaskAvg      : s.bTaskAvg,
+        bTaskStddev   : s.bTaskStddev,
+        bSrtt         : s.bSrtt,
+        bRto          : s.bRto,
+      },
+    };
+  }
+
+  for (const [name, s] of Object.entries(canbusState)) {
+    state.canbusPanels[name] = {
+      last   : s.last,
+      data   : s.chart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets: { bRxErr: s.bRxErr, bTxErr: s.bTxErr, bTxRetry: s.bTxRetry },
+    };
+  }
+
+  const hs = hostState['system_stats'];
+  if (hs) {
+    state.hostPanel = {
+      last   : hs.last,
+      data   : hs.chart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets: { bSysload: hs.bSysload, bMemAvail: hs.bMemAvail },
+    };
+  }
+
+  for (const [key, sc] of Object.entries(mcuStatCharts)) {
+    state.mcuStatData[key] = sc.chart.data.datasets.map(d => pruneOldPoints(d.data));
+  }
+  for (const [key, sc] of Object.entries(canbusStatCharts)) {
+    state.canbusStatData[key] = sc.chart.data.datasets.map(d => pruneOldPoints(d.data));
+  }
+
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    log(`Could not save history to localStorage: ${e.message}`, 'warn');
+  }
+}
+
+/**
+ * Restore chart data and bucket state from localStorage.
+ * Only restores when the stored host matches the current connection.
+ * Panels must already be created before calling this.
+ */
+function restoreFromLocalStorage() {
+  let state;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    state = JSON.parse(raw);
+  } catch (e) {
+    log('Could not load history from localStorage (corrupt data — cleared).', 'warn');
+    localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+
+  if (!state || state.host !== currentHost) return;
+
+  const age = Date.now() - (state.savedAt || 0);
+  if (age > HISTORY_MS) {
+    log('Stored history is older than 12 h — discarded.', 'warn');
+    localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+
+  let restoredPanels = 0;
+
+  for (const [name, saved] of Object.entries(state.mcuPanels || {})) {
+    const s = mcuState[name];
+    if (!s) continue;
+    const charts = [
+      [s.errChart,     saved.errData],
+      [s.trafficChart, saved.trafficData],
+      [s.perfChart,    saved.perfData],
+      [s.srttChart,    saved.srttData],
+    ];
+    // On reconnect the charts already have live in-memory data; skip restoring
+    // older saved data to prevent overwriting more recent points.
+    const alreadyHasData = charts.some(([chart]) =>
+      chart.data.datasets.some(d => d.data.length > 0));
+    if (alreadyHasData) continue;
+
+    s.last = saved.last || {};
+    for (const [chart, dataArrays] of charts) {
+      if (!dataArrays) continue;
+      chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
+      chart.update('none');
+    }
+    if (saved.buckets) Object.assign(s, saved.buckets);
+    restoredPanels++;
+  }
+
+  for (const [name, saved] of Object.entries(state.canbusPanels || {})) {
+    const s = canbusState[name];
+    if (!s) continue;
+    // Skip if live data already present
+    if (s.chart.data.datasets.some(d => d.data.length > 0)) continue;
+
+    s.last = saved.last || {};
+    if (saved.data) {
+      s.chart.data.datasets.forEach((d, i) => { d.data = saved.data[i] || []; });
+      s.chart.update('none');
+    }
+    if (saved.buckets) Object.assign(s, saved.buckets);
+    restoredPanels++;
+  }
+
+  if (state.hostPanel) {
+    const hs = hostState['system_stats'];
+    if (hs) {
+      // Skip if live data already present
+      if (!hs.chart.data.datasets.some(d => d.data.length > 0)) {
+        hs.last = state.hostPanel.last || {};
+        if (state.hostPanel.data) {
+          hs.chart.data.datasets.forEach((d, i) => { d.data = state.hostPanel.data[i] || []; });
+          hs.chart.update('none');
+        }
+        if (state.hostPanel.buckets) Object.assign(hs, state.hostPanel.buckets);
+        restoredPanels++;
+      }
+    }
+  }
+
+  for (const [key, dataArrays] of Object.entries(state.mcuStatData || {})) {
+    const sc = mcuStatCharts[key];
+    if (!sc || !dataArrays) continue;
+    if (sc.chart.data.datasets.some(d => d.data.length > 0)) continue;
+    sc.chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
+    sc.chart.update('none');
+  }
+  for (const [key, dataArrays] of Object.entries(state.canbusStatData || {})) {
+    const sc = canbusStatCharts[key];
+    if (!sc || !dataArrays) continue;
+    if (sc.chart.data.datasets.some(d => d.data.length > 0)) continue;
+    sc.chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
+    sc.chart.update('none');
+  }
+
+  if (restoredPanels > 0) {
+    log(`Restored ${restoredPanels} panel(s) of history from localStorage.`, 'ok');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Boot
+// ═══════════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  const host = guessHost();
+  if (host) {
+    document.getElementById('host-input').value = host;
+    // Auto-connect when served from a real printer host
+    connect();
+  }
+
+  // Persist chart data every 30 s and on page unload so an accidental
+  // refresh does not wipe accumulated history.
+  setInterval(saveToLocalStorage, 30_000);
+  window.addEventListener('beforeunload', saveToLocalStorage);
+});
+</script>
+
+</body>
+</html>
