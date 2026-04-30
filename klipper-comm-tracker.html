@@ -252,6 +252,65 @@
     #clear-btn { background: #2a1a00; }
     #clear-btn:hover { background: #4a3000; }
 
+    /* ── Tooltip ──────────────────────────────────────────────────── */
+    .tt {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 13px; height: 13px;
+      border-radius: 50%;
+      background: rgba(160,160,176,.15);
+      border: 1px solid rgba(160,160,176,.3);
+      color: var(--muted);
+      font-size: 0.58rem;
+      font-weight: 700;
+      cursor: help;
+      margin-left: 4px;
+      vertical-align: middle;
+      position: relative;
+      flex-shrink: 0;
+    }
+    .tt::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: #12122a;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 7px 11px;
+      font-size: 0.69rem;
+      line-height: 1.55;
+      color: var(--text);
+      width: 250px;
+      white-space: normal;
+      z-index: 300;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s;
+      text-align: left;
+      font-weight: normal;
+    }
+    .tt:hover::after { opacity: 1; }
+
+    /* ── Panel collapse ───────────────────────────────────────────── */
+    .collapse-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 2px 7px;
+      font-size: 0.72rem;
+      line-height: 1.4;
+      flex-shrink: 0;
+      transition: color 0.15s, transform 0.2s;
+    }
+    .collapse-btn:hover { color: var(--text); filter: none; }
+    .panel--collapsed .collapse-btn { transform: rotate(-90deg); }
+    .panel--collapsed .panel-body   { display: none; }
+
     /* ── View toggle tabs ─────────────────────────────────────── */
     .view-tabs {
       display: flex;
@@ -281,14 +340,15 @@
 
 <!-- ═══════════════════════ HEADER ══════════════════════════ -->
 <header>
-  <h1>🖨️ Klipper Comm Tracker</h1>
+  <h1>Klipper Comm Tracker</h1>
   <span class="history-info">10 s buckets · up to 12 h history</span>
   <div class="view-tabs">
     <button id="tab-device" class="tab-btn active" onclick="setView('device')">By Device</button>
     <button id="tab-stat"   class="tab-btn"        onclick="setView('stat')">By Stat</button>
   </div>
   <div class="conn-form">
-    <input type="text" id="host-input" placeholder="Moonraker host (e.g. 192.168.1.100)" />
+    <input type="text" id="host-input" placeholder="Moonraker host (e.g. 192.168.1.100)"
+           onkeydown="if(event.key==='Enter')connect()" />
     <button id="connect-btn"    onclick="connect()">Connect</button>
     <button id="disconnect-btn" onclick="disconnect()">Disconnect</button>
     <button id="clear-btn"      onclick="clearChartData()" style="display:none">Clear Data</button>
@@ -352,10 +412,13 @@
 // aggregated before being stored — 'last' (most-recent sample) for cumulative
 // counters, 'avg' (mean) for level/rate values.
 // This keeps chart point counts manageable while retaining long history.
-const BUCKET_MS   = 10_000;                       // 10-second aggregation buckets
-const MAX_BUCKETS = (12 * 60 * 60) / (BUCKET_MS / 1000); // 12 h ÷ 10 s = 4 320 buckets
-const RPC_TIMEOUT_MS = 12_000;                    // JSON-RPC call timeout
-const MAX_LOG_LINES  = 120;                       // max lines kept in the log panel
+const BUCKET_MS    = 10_000;                       // 10-second aggregation buckets
+const HISTORY_MS   = 12 * 60 * 60 * 1000;         // 12 h in ms — prune threshold
+const MAX_BUCKETS  = HISTORY_MS / BUCKET_MS;       // 4 320 points max per series
+const RPC_TIMEOUT_MS = 12_000;                     // JSON-RPC call timeout
+const MAX_LOG_LINES  = 120;                        // max lines kept in the log panel
+const STORAGE_KEY        = 'kct_v1';              // localStorage key for chart data
+const STORAGE_COLLAPSE_KEY = 'kct_collapsed_v1'; // localStorage key for panel collapse
 
 const COLORS = {
   retransmit    : '#f28c28',
@@ -366,6 +429,8 @@ const COLORS = {
   awake         : '#9b59b6',
   task_avg      : '#3498db',
   task_stddev   : '#2980b9',
+  srtt          : '#00d4aa',
+  rto           : '#f28c28',
   rx_err        : '#e74c3c',
   tx_err        : '#f28c28',
   tx_retry      : '#f1c40f',
@@ -404,8 +469,16 @@ const CANBUS_STAT_DEFS = [
 let ws          = null;
 let msgId       = 1;
 let currentHost = null;     // host we last successfully initialised against
+
+/**
+ * Calibration between Klipper's internal monotonic clock (eventtime, seconds
+ * since process start) and the browser's wall-clock milliseconds.
+ * Set once on subscribe and re-used for every subsequent notification.
+ */
+let eventtimeCalibration = null; // { klipper: float, wallMs: number }
+
 const pending          = {};  // id → {resolve, reject}
-const mcuState         = {};  // name → {errChart, trafficChart, perfChart, statsEl, b*}
+const mcuState         = {};  // name → {errChart, trafficChart, perfChart, srttChart, statsEl, b*}
 const canbusState      = {};  // name → {chart, statsEl, stateEl, b*}
 const hostState        = {};  // 'system_stats' → {chart, statsEl, bSysload, bMemAvail, last}
 const mcuStatCharts    = {};  // statKey → {chart, buckets:{mcuName→bucket}, def, dsIdx:{mcuName→int}}
@@ -453,13 +526,16 @@ function setStatus(s) {
 function sendRpc(method, params) {
   return new Promise((resolve, reject) => {
     const id = msgId++;
-    pending[id] = { resolve, reject };
+    const timeoutId = setTimeout(() => {
+      if (pending[id]) { delete pending[id]; reject(new Error(`RPC timeout for "${method}"`)); }
+    }, RPC_TIMEOUT_MS);
+    pending[id] = {
+      resolve: (result) => { clearTimeout(timeoutId); resolve(result); },
+      reject:  (err)    => { clearTimeout(timeoutId); reject(err); },
+    };
     const msg = { jsonrpc: '2.0', method, id };
     if (params !== undefined) msg.params = params;
     ws.send(JSON.stringify(msg));
-    setTimeout(() => {
-      if (pending[id]) { delete pending[id]; reject(new Error('RPC timeout')); }
-    }, RPC_TIMEOUT_MS);
   });
 }
 
@@ -516,9 +592,10 @@ function connect() {
     }
 
     // Subscription notification
-    // params[0] = status dict, params[1] = eventtime
+    // params[0] = status dict, params[1] = Klipper eventtime (seconds, monotonic)
     if (msg.method === 'notify_status_update' && Array.isArray(msg.params)) {
-      handleUpdate(msg.params[0]);
+      const [status, eventtime] = msg.params;
+      handleUpdate(status, false, eventtimeToMs(eventtime));
     }
   };
 }
@@ -545,6 +622,7 @@ function clearPanels() {
     s.errChart.destroy();
     s.trafficChart.destroy();
     s.perfChart.destroy();
+    s.srttChart.destroy();
   }
   for (const s of Object.values(canbusState)) {
     s.chart.destroy();
@@ -572,7 +650,9 @@ function clearPanels() {
   document.getElementById('canbus-section').style.display        = 'none';
   document.getElementById('mcu-stat-section').style.display      = 'none';
   document.getElementById('canbus-stat-section').style.display   = 'none';
+  eventtimeCalibration = null;
   currentHost = null;
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
 }
 
 /**
@@ -582,7 +662,7 @@ function clearPanels() {
 function clearChartData() {
   // Per-device MCU charts
   for (const s of Object.values(mcuState)) {
-    for (const chart of [s.errChart, s.trafficChart, s.perfChart]) {
+    for (const chart of [s.errChart, s.trafficChart, s.perfChart, s.srttChart]) {
       chart.data.datasets.forEach(d => { d.data = []; });
       chart.update('none');
     }
@@ -594,6 +674,8 @@ function clearChartData() {
     s.bAwake         = makeBuckets('avg');
     s.bTaskAvg       = makeBuckets('avg');
     s.bTaskStddev    = makeBuckets('avg');
+    s.bSrtt          = makeBuckets('avg');
+    s.bRto           = makeBuckets('avg');
     s.last = {};
   }
   // Per-device canbus charts
@@ -630,6 +712,8 @@ function clearChartData() {
     }
   }
   log('Chart data cleared.', 'info');
+  // Also clear persisted storage so stale data is not restored on next reload
+  try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
 }
 
 // ── Initialise: discover objects → create panels → subscribe ─
@@ -673,6 +757,10 @@ async function initialise() {
       document.getElementById('canbus-stat-section').style.display = '';
     }
 
+    // Restore persisted history before subscribing so charts are pre-populated.
+    restoreFromLocalStorage();
+    restoreCollapseStates();
+
     // Build subscription request – null means subscribe to all fields
     const subObjects = {};
     if (hasHost) subObjects['system_stats'] = null;
@@ -682,10 +770,18 @@ async function initialise() {
     const subRes = await sendRpc('printer.objects.subscribe', { objects: subObjects });
     log('Subscribed to object updates.', 'ok');
 
+    // Calibrate Klipper's internal eventtime against browser wall-clock so
+    // timestamps on all subsequent notifications map to real calendar time.
+    if (subRes && subRes.eventtime) {
+      calibrateEventtime(subRes.eventtime);
+      log(`Eventtime calibrated (Klipper t=${subRes.eventtime.toFixed(3)} s).`);
+    }
+
     // Process the status snapshot from the subscribe response immediately so
     // charts have baseline values before the first live update arrives.
     if (subRes && subRes.status) {
-      handleUpdate(subRes.status, true);
+      const ts = eventtimeToMs(subRes.eventtime);
+      handleUpdate(subRes.status, true, ts);
     }
 
     // Fetch a full snapshot via HTTP to pre-populate fields that Moonraker omits
@@ -695,22 +791,22 @@ async function initialise() {
       const qs  = Object.keys(subObjects).map(k => encodeURIComponent(k)).join('&');
       const url = `${httpUrl(currentHost)}/printer/objects/query?${qs}`;
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status} — check that Moonraker is running and CORS is allowed`);
       const json = await res.json();
       if (json && json.result && json.result.status) {
-        handleUpdate(json.result.status, true);
+        const ts = json.result.eventtime ? eventtimeToMs(json.result.eventtime) : Date.now();
+        handleUpdate(json.result.status, true, ts);
       }
-    } catch (qe) {
-      log(`Initial HTTP query failed (non-fatal): ${qe.message}`, 'warn');
+    } catch (queryError) {
+      log(`Initial HTTP snapshot failed (non-fatal): ${queryError.message}`, 'warn');
     }
   } catch (e) {
-    log(`Init error: ${e.message}`, 'err');
+    log(`Connection setup failed: ${e.message}`, 'err');
   }
 }
 
 // ── Status update router ──────────────────────────────────────
-function handleUpdate(status, seed = false) {
-  const ts = Date.now();
+function handleUpdate(status, seed = false, ts = Date.now()) {
   for (const [name, data] of Object.entries(status)) {
     if (name === 'mcu' || name.startsWith('mcu ')) {
       if (data.last_stats && mcuState[name]) onMcuData(name, data.last_stats, ts, seed);
@@ -719,6 +815,70 @@ function handleUpdate(status, seed = false) {
     } else if (name === 'system_stats') {
       onHostData(data, ts, seed);
     }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Eventtime calibration
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Record a mapping between Klipper's monotonic eventtime (seconds since
+ * process start) and the current browser wall-clock milliseconds.
+ * Call once after the subscribe response which carries eventtime.
+ */
+function calibrateEventtime(klipperEventtime) {
+  eventtimeCalibration = { klipper: klipperEventtime, wallMs: Date.now() };
+}
+
+/**
+ * Convert a Klipper eventtime (seconds, monotonic) to a wall-clock ms value
+ * suitable for Chart.js time-axis points.  Falls back to Date.now() when no
+ * calibration is available (e.g. from a plain HTTP snapshot).
+ */
+function eventtimeToMs(klipperEventtime) {
+  if (!eventtimeCalibration || klipperEventtime === null || klipperEventtime === undefined) return Date.now();
+  return eventtimeCalibration.wallMs + (klipperEventtime - eventtimeCalibration.klipper) * 1000;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Collapsible panel helpers
+// ═══════════════════════════════════════════════════════════════
+
+/** Collapse/expand the panel that owns the given toggle button. */
+function togglePanel(btn) {
+  const panel  = btn.closest('.panel');
+  const panelId = panel.dataset.panelId;
+  const isCollapsed = panel.classList.toggle('panel--collapsed');
+  if (panelId) savePanelCollapseState(panelId, isCollapsed);
+}
+
+/** Persist a single panel's collapse state to localStorage. */
+function savePanelCollapseState(panelId, collapsed) {
+  try {
+    const raw   = localStorage.getItem(STORAGE_COLLAPSE_KEY);
+    const ids   = new Set(raw ? JSON.parse(raw) : []);
+    if (collapsed) ids.add(panelId);
+    else           ids.delete(panelId);
+    localStorage.setItem(STORAGE_COLLAPSE_KEY, JSON.stringify([...ids]));
+  } catch {
+    // localStorage unavailable — non-fatal
+  }
+}
+
+/** Apply stored collapse states to all panels in the document. */
+function restoreCollapseStates() {
+  try {
+    const raw = localStorage.getItem(STORAGE_COLLAPSE_KEY);
+    if (!raw) return;
+    const ids = new Set(JSON.parse(raw));
+    document.querySelectorAll('.panel[data-panel-id]').forEach(panel => {
+      if (ids.has(panel.dataset.panelId)) {
+        panel.classList.add('panel--collapsed');
+      }
+    });
+  } catch {
+    // Corrupt localStorage entry — ignore
   }
 }
 
@@ -865,30 +1025,40 @@ function seedChart(chart, dsIdx, b, ts, value) {
 // ═══════════════════════════════════════════════════════════════
 
 function createMcuPanel(name) {
-  const id    = safeId(name);
-  const label = name === 'mcu' ? 'Main MCU' : 'MCU: ' + name.replace('mcu ', '');
+  const id      = safeId(name);
+  const label   = name === 'mcu' ? 'Main MCU' : 'MCU: ' + name.replace('mcu ', '');
+  const panelId = `mcu-${id}`;
 
   const el = document.createElement('div');
   el.className = 'panel';
+  el.dataset.panelId = panelId;
   el.innerHTML = `
     <div class="panel-header">
-      <div class="panel-title">🔌 ${label}</div>
+      <div class="panel-title">⚡ ${label}</div>
+      <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
     </div>
-    <div class="stats-row" id="mcu-stats-${id}"></div>
+    <div class="panel-body">
+      <div class="stats-row" id="mcu-stats-${id}"></div>
 
-    <div class="chart-block">
-      <div class="chart-label">Communication Errors (cumulative)</div>
-      <div class="chart-wrap"><canvas id="mcu-err-${id}"></canvas></div>
-    </div>
+      <div class="chart-block">
+        <div class="chart-label">Communication Errors (cumulative)</div>
+        <div class="chart-wrap"><canvas id="mcu-err-${id}"></canvas></div>
+      </div>
 
-    <div class="chart-block">
-      <div class="chart-label">Communication Traffic (cumulative bytes)</div>
-      <div class="chart-wrap"><canvas id="mcu-traffic-${id}"></canvas></div>
-    </div>
+      <div class="chart-block">
+        <div class="chart-label">Communication Traffic (cumulative bytes)</div>
+        <div class="chart-wrap"><canvas id="mcu-traffic-${id}"></canvas></div>
+      </div>
 
-    <div class="chart-block">
-      <div class="chart-label">MCU Performance (10 s bucket avg)</div>
-      <div class="chart-wrap"><canvas id="mcu-perf-${id}"></canvas></div>
+      <div class="chart-block">
+        <div class="chart-label">MCU Performance (10 s bucket avg)</div>
+        <div class="chart-wrap"><canvas id="mcu-perf-${id}"></canvas></div>
+      </div>
+
+      <div class="chart-block">
+        <div class="chart-label">Round-Trip Time (10 s bucket avg)</div>
+        <div class="chart-wrap"><canvas id="mcu-srtt-${id}"></canvas></div>
+      </div>
     </div>
   `;
   document.getElementById('mcu-panels').appendChild(el);
@@ -897,9 +1067,9 @@ function createMcuPanel(name) {
   const errChart = makeChart(
     document.getElementById(`mcu-err-${id}`).getContext('2d'),
     [
-      ds('bytes_retransmit', COLORS.retransmit),
-      ds('bytes_invalid',    COLORS.invalid),
-      ds('retransmit_seq',   COLORS.retransmit_seq, true),
+      ds('Retransmit bytes', COLORS.retransmit),
+      ds('Invalid bytes',    COLORS.invalid),
+      ds('Retransmit seqs',  COLORS.retransmit_seq, true),
     ],
     {
       x: BASE_SCALE_X,
@@ -911,8 +1081,8 @@ function createMcuPanel(name) {
   const trafficChart = makeChart(
     document.getElementById(`mcu-traffic-${id}`).getContext('2d'),
     [
-      ds('bytes_write', COLORS.write),
-      ds('bytes_read',  COLORS.read),
+      ds('Bytes written', COLORS.write),
+      ds('Bytes read',    COLORS.read),
     ],
     {
       x: BASE_SCALE_X,
@@ -924,9 +1094,9 @@ function createMcuPanel(name) {
   const perfChart = makeChart(
     document.getElementById(`mcu-perf-${id}`).getContext('2d'),
     [
-      ds('mcu_awake %',    COLORS.awake,       false, 'y'),
-      ds('task_avg µs',    COLORS.task_avg,    true,  'y1'),
-      ds('task_stddev µs', COLORS.task_stddev, true,  'y1'),
+      ds('MCU awake %',    COLORS.awake,       false, 'y'),
+      ds('Task avg µs',    COLORS.task_avg,    true,  'y1'),
+      ds('Task stddev µs', COLORS.task_stddev, true,  'y1'),
     ],
     {
       x  : BASE_SCALE_X,
@@ -945,11 +1115,24 @@ function createMcuPanel(name) {
     },
   );
 
+  // SRTT / RTO chart
+  const srttChart = makeChart(
+    document.getElementById(`mcu-srtt-${id}`).getContext('2d'),
+    [
+      ds('SRTT ms', COLORS.srtt),
+      ds('RTO ms',  COLORS.rto,  true),
+    ],
+    {
+      x: BASE_SCALE_X,
+      y: { ...BASE_SCALE_Y, title: { display: true, text: 'ms', color: '#a0a0b0', font: { size: 10 } } },
+    },
+  );
+
   mcuState[name] = {
-    errChart, trafficChart, perfChart,
+    errChart, trafficChart, perfChart, srttChart,
     statsEl: document.getElementById(`mcu-stats-${id}`),
     last   : {},  // last-known values — only updated when a field is present in an update
-    // Bucket accumulators — 'last' for cumulative counters, 'avg' for levels
+    // Bucket accumulators — 'last' for cumulative counters, 'avg' for levels/rates
     bRetransmit    : makeBuckets('last'),
     bInvalid       : makeBuckets('last'),
     bRetransmitSeq : makeBuckets('last'),
@@ -958,6 +1141,8 @@ function createMcuPanel(name) {
     bAwake         : makeBuckets('avg'),
     bTaskAvg       : makeBuckets('avg'),
     bTaskStddev    : makeBuckets('avg'),
+    bSrtt          : makeBuckets('avg'),
+    bRto           : makeBuckets('avg'),
   };
 }
 
@@ -972,20 +1157,28 @@ function onMcuData(name, stats, ts, seed = false) {
   const L = s.last; // convenience alias
 
   // ── Stat badges ───────────────────────────────────────────
-  const br  = L.bytes_retransmit ?? 0;
-  const bi  = L.bytes_invalid    ?? 0;
-  const srtt = L.srtt != null ? (L.srtt * 1000).toFixed(3) + ' ms' : '—';
-  const rto  = L.rto  != null ? (L.rto  * 1000).toFixed(1) + ' ms' : '—';
+  const retransmitBytes = L.bytes_retransmit ?? 0;
+  const invalidBytes    = L.bytes_invalid    ?? 0;
+  const srttDisplay = L.srtt != null ? (L.srtt * 1000).toFixed(3) + ' ms' : '—';
+  const rtoDisplay  = L.rto  != null ? (L.rto  * 1000).toFixed(1) + ' ms' : '—';
 
   s.statsEl.innerHTML =
-    sb('bytes_write',      fmtBytes(L.bytes_write ?? 0)) +
-    sb('bytes_read',       fmtBytes(L.bytes_read  ?? 0)) +
-    sb('bytes_retransmit', br,  br  > 0 ? 'warn' : 'ok') +
-    sb('bytes_invalid',    bi,  bi  > 0 ? 'err'  : 'ok') +
-    sb('send_seq',         L.send_seq    ?? '—') +
-    sb('receive_seq',      L.receive_seq ?? '—') +
-    sb('srtt',             srtt) +
-    sb('rto',              rto);
+    sb('Bytes written',     fmtBytes(L.bytes_write ?? 0), '',
+       'Total bytes transmitted from host to MCU since process start (cumulative).') +
+    sb('Bytes read',        fmtBytes(L.bytes_read  ?? 0), '',
+       'Total bytes received from MCU to host since process start (cumulative).') +
+    sb('Retransmit bytes',  retransmitBytes, retransmitBytes > 0 ? 'warn' : 'ok',
+       'Bytes retransmitted due to a missing acknowledgement or CRC failure. Any non-zero value indicates link errors.') +
+    sb('Invalid bytes',     invalidBytes, invalidBytes > 0 ? 'err' : 'ok',
+       'Bytes discarded because the CRC check failed on receive. Indicates electrical noise or a bad cable/connector.') +
+    sb('Send seq',          L.send_seq    ?? '—', '',
+       'Outgoing message sequence number (host → MCU). Wraps at the 16-bit boundary; used to detect dropped messages.') +
+    sb('Receive seq',       L.receive_seq ?? '—', '',
+       'Incoming message sequence number (MCU → host). A gap between send_seq and receive_seq means messages were lost.') +
+    sb('SRTT',              srttDisplay, '',
+       'Smoothed Round-Trip Time — exponential moving average of MCU acknowledgement latency (similar to TCP SRTT). Higher values mean more latency.') +
+    sb('RTO',               rtoDisplay, '',
+       'Retransmission Timeout — threshold after which an unacknowledged message is resent. Derived from SRTT plus variance.');
 
   // Choose between immediate seed point and normal bucketed accumulation.
   const applyChart = seed
@@ -1014,6 +1207,12 @@ function onMcuData(name, stats, ts, seed = false) {
   if (stats.mcu_task_stddev !== undefined) dirty |= applyChart(s.perfChart, 2, s.bTaskStddev, L.mcu_task_stddev * 1e6);
   if (dirty) s.perfChart.update('none');
 
+  // SRTT / RTO chart
+  dirty = false;
+  if (stats.srtt !== undefined && L.srtt != null) dirty |= applyChart(s.srttChart, 0, s.bSrtt, L.srtt * 1000);
+  if (stats.rto  !== undefined && L.rto  != null) dirty |= applyChart(s.srttChart, 1, s.bRto,  L.rto  * 1000);
+  if (dirty) s.srttChart.update('none');
+
   // ── Stat-grouped charts ───────────────────────────────────
   for (const def of MCU_STAT_DEFS) {
     if (stats[def.key] === undefined) continue; // field absent in this update — skip
@@ -1033,21 +1232,26 @@ function onMcuData(name, stats, ts, seed = false) {
 // ═══════════════════════════════════════════════════════════════
 
 function createCanbusPanel(name) {
-  const id    = safeId(name);
-  const label = name.replace('canbus_stats ', '');
+  const id      = safeId(name);
+  const label   = name.replace('canbus_stats ', '');
+  const panelId = `can-${id}`;
 
   const el = document.createElement('div');
   el.className = 'panel';
+  el.dataset.panelId = panelId;
   el.innerHTML = `
     <div class="panel-header">
       <div class="panel-title">🔗 CAN: ${label}</div>
       <span class="bus-state unknown" id="can-state-${id}">unknown</span>
+      <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
     </div>
-    <div class="stats-row" id="can-stats-${id}"></div>
+    <div class="panel-body">
+      <div class="stats-row" id="can-stats-${id}"></div>
 
-    <div class="chart-block">
-      <div class="chart-label">Errors &amp; Retries (cumulative)</div>
-      <div class="chart-wrap"><canvas id="can-chart-${id}"></canvas></div>
+      <div class="chart-block">
+        <div class="chart-label">Errors &amp; Retries (cumulative)</div>
+        <div class="chart-wrap"><canvas id="can-chart-${id}"></canvas></div>
+      </div>
     </div>
   `;
   document.getElementById('canbus-panels').appendChild(el);
@@ -1055,9 +1259,9 @@ function createCanbusPanel(name) {
   const chart = makeChart(
     document.getElementById(`can-chart-${id}`).getContext('2d'),
     [
-      ds('rx_error',   COLORS.rx_err),
-      ds('tx_error',   COLORS.tx_err),
-      ds('tx_retries', COLORS.tx_retry, true),
+      ds('RX errors',   COLORS.rx_err),
+      ds('TX errors',   COLORS.tx_err),
+      ds('TX retries',  COLORS.tx_retry, true),
     ],
     {
       x: BASE_SCALE_X,
@@ -1094,14 +1298,17 @@ function onCanbusData(name, data, ts, seed = false) {
   }
 
   // ── Stat badges ───────────────────────────────────────────
-  const rxe = L.rx_error   ?? 0;
-  const txe = L.tx_error   ?? 0;
-  const txr = L.tx_retries ?? 0;
+  const rxErrors  = L.rx_error   ?? 0;
+  const txErrors  = L.tx_error   ?? 0;
+  const txRetries = L.tx_retries ?? 0;
 
   s.statsEl.innerHTML =
-    sb('rx_error',   rxe, rxe > 0 ? 'warn' : 'ok') +
-    sb('tx_error',   txe, txe > 0 ? 'warn' : 'ok') +
-    sb('tx_retries', txr, txr > 0 ? 'warn' : 'ok');
+    sb('RX errors',   rxErrors,  rxErrors  > 0 ? 'warn' : 'ok',
+       'CAN controller receive error counter. Increments when a received frame fails validation. Per CAN spec, values above 127 trigger passive mode.') +
+    sb('TX errors',   txErrors,  txErrors  > 0 ? 'warn' : 'ok',
+       'CAN controller transmit error counter. Increments when a transmitted frame is not acknowledged by any other node on the bus.') +
+    sb('TX retries',  txRetries, txRetries > 0 ? 'warn' : 'ok',
+       'Number of CAN frames retransmitted after a transmission error. Indicates bus contention or a noisy/faulty CAN connection.');
 
   const applyChart = seed
     ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
@@ -1109,9 +1316,9 @@ function onCanbusData(name, data, ts, seed = false) {
 
   // ── Per-device chart — only feed when the field arrived in this update ────
   let dirty = false;
-  if (data.rx_error   !== undefined) dirty |= applyChart(s.chart, 0, s.bRxErr,   L.rx_error);
-  if (data.tx_error   !== undefined) dirty |= applyChart(s.chart, 1, s.bTxErr,   L.tx_error);
-  if (data.tx_retries !== undefined) dirty |= applyChart(s.chart, 2, s.bTxRetry, L.tx_retries);
+  if (data.rx_error   !== undefined) dirty |= applyChart(s.chart, 0, s.bRxErr,   rxErrors);
+  if (data.tx_error   !== undefined) dirty |= applyChart(s.chart, 1, s.bTxErr,   txErrors);
+  if (data.tx_retries !== undefined) dirty |= applyChart(s.chart, 2, s.bTxRetry, txRetries);
   if (dirty) s.chart.update('none');
 
   // ── Stat-grouped charts ───────────────────────────────────
@@ -1135,15 +1342,19 @@ function onCanbusData(name, data, ts, seed = false) {
 function createHostPanel() {
   const el = document.createElement('div');
   el.className = 'panel';
+  el.dataset.panelId = 'host';
   el.innerHTML = `
     <div class="panel-header">
       <div class="panel-title">🖥️ Host Load</div>
+      <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
     </div>
-    <div class="stats-row" id="host-stats"></div>
+    <div class="panel-body">
+      <div class="stats-row" id="host-stats"></div>
 
-    <div class="chart-block">
-      <div class="chart-label">CPU Load &amp; Available Memory</div>
-      <div class="chart-wrap"><canvas id="host-chart"></canvas></div>
+      <div class="chart-block">
+        <div class="chart-label">CPU Load &amp; Available Memory</div>
+        <div class="chart-wrap"><canvas id="host-chart"></canvas></div>
+      </div>
     </div>
   `;
   document.getElementById('host-panels').appendChild(el);
@@ -1151,8 +1362,8 @@ function createHostPanel() {
   const chart = makeChart(
     document.getElementById('host-chart').getContext('2d'),
     [
-      ds('sysload',  COLORS.cpu_load,  false, 'y'),
-      ds('memavail (MB)', COLORS.mem_avail, true,  'y1'),
+      ds('System load',  COLORS.cpu_load,  false, 'y'),
+      ds('Mem avail (MB)', COLORS.mem_avail, true,  'y1'),
     ],
     {
       x  : BASE_SCALE_X,
@@ -1190,14 +1401,17 @@ function onHostData(data, ts, seed = false) {
   const L = s.last;
 
   // ── Stat badges ───────────────────────────────────────────
-  const sysload  = L.sysload  != null ? L.sysload.toFixed(2)                           : '—';
-  const memavail = L.memavail != null ? fmtBytes((L.memavail) * 1024) + ' avail'       : '—';
-  const cputime  = L.cputime  != null ? L.cputime.toFixed(1) + ' s'                    : '—';
+  const sysloadDisplay  = L.sysload  != null ? L.sysload.toFixed(2)                     : '—';
+  const memavailDisplay = L.memavail != null ? fmtBytes(L.memavail * 1024) + ' avail'   : '—';
+  const cputimeDisplay  = L.cputime  != null ? L.cputime.toFixed(1) + ' s'              : '—';
 
   s.statsEl.innerHTML =
-    sb('sysload',  sysload) +
-    sb('memavail', memavail) +
-    sb('cputime',  cputime);
+    sb('System load',  sysloadDisplay, '',
+       'Linux 1-minute load average from /proc/loadavg. Values above the number of CPU cores indicate the system is overloaded.') +
+    sb('Memory avail', memavailDisplay, '',
+       'Available memory in kB from /proc/meminfo MemAvailable — memory the OS can allocate without swapping.') +
+    sb('CPU time',     cputimeDisplay, '',
+       'Cumulative CPU time consumed by the Klipper process since start (seconds), from /proc/PID/stat.');
 
   const applyChart = seed
     ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
@@ -1216,14 +1430,19 @@ function onHostData(data, ts, seed = false) {
 
 function createMcuStatCharts(mcuObjs) {
   for (const def of MCU_STAT_DEFS) {
+    const panelId = `mcu-stat-${def.key}`;
     const panelEl = document.createElement('div');
     panelEl.className = 'panel';
+    panelEl.dataset.panelId = panelId;
     panelEl.innerHTML = `
       <div class="panel-header">
         <div class="panel-title">📊 ${def.label}</div>
+        <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
       </div>
-      <div class="chart-block">
-        <div class="chart-wrap"><canvas id="mcu-stat-chart-${def.key}"></canvas></div>
+      <div class="panel-body">
+        <div class="chart-block">
+          <div class="chart-wrap"><canvas id="mcu-stat-chart-${def.key}"></canvas></div>
+        </div>
       </div>
     `;
     document.getElementById('mcu-stat-panels').appendChild(panelEl);
@@ -1255,14 +1474,19 @@ function createMcuStatCharts(mcuObjs) {
 
 function createCanbusStatCharts(canbusObjs) {
   for (const def of CANBUS_STAT_DEFS) {
+    const panelId = `can-stat-${def.key}`;
     const panelEl = document.createElement('div');
     panelEl.className = 'panel';
+    panelEl.dataset.panelId = panelId;
     panelEl.innerHTML = `
       <div class="panel-header">
         <div class="panel-title">📊 ${def.label}</div>
+        <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
       </div>
-      <div class="chart-block">
-        <div class="chart-wrap"><canvas id="can-stat-chart-${def.key}"></canvas></div>
+      <div class="panel-body">
+        <div class="chart-block">
+          <div class="chart-wrap"><canvas id="can-stat-chart-${def.key}"></canvas></div>
+        </div>
       </div>
     `;
     document.getElementById('canbus-stat-panels').appendChild(panelEl);
@@ -1301,16 +1525,212 @@ function safeId(name) {
   return name.replace(/[^a-zA-Z0-9]/g, '_');
 }
 
-/** Format byte counts as human-readable. */
+/** Format byte counts as human-readable strings. */
 function fmtBytes(n) {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + ' MB';
   if (n >= 1_000)     return (n / 1_000).toFixed(1) + ' KB';
   return n + ' B';
 }
 
-/** Build a stat badge HTML string. */
-function sb(label, value, cls = '') {
-  return `<span class="sb ${cls}"><span class="lbl">${label}:</span><span class="val">${value}</span></span>`;
+/** Escape a string for safe use inside an HTML attribute value. */
+function htmlEscape(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Build a stat badge HTML string.
+ * @param {string} label     - Human-readable label shown on the badge.
+ * @param {*}      value     - Formatted value to display.
+ * @param {string} cls       - Optional extra CSS class ('ok' | 'warn' | 'err').
+ * @param {string} tooltip   - Optional tooltip text shown on hover.
+ */
+function sb(label, value, cls = '', tooltip = '') {
+  const ttHtml = tooltip
+    ? `<span class="tt" data-tip="${htmlEscape(tooltip)}">?</span>`
+    : '';
+  return `<span class="sb ${cls}"><span class="lbl">${label}${ttHtml}:</span><span class="val">${value}</span></span>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  LocalStorage persistence
+// ═══════════════════════════════════════════════════════════════
+
+/** Filter out data points older than the 12-hour history window. */
+function pruneOldPoints(points) {
+  const cutoff = Date.now() - HISTORY_MS;
+  return points.filter(p => p.x >= cutoff);
+}
+
+/**
+ * Serialise all chart data + bucket state + last-known values to localStorage.
+ * Old data is pruned before saving so the entry does not grow unboundedly.
+ * Silently handles QuotaExceededError by logging a warning.
+ */
+function saveToLocalStorage() {
+  if (!currentHost) return;
+
+  const state = {
+    version   : 1,
+    host      : currentHost,
+    savedAt   : Date.now(),
+    eventtimeCalibration,
+    mcuPanels    : {},
+    canbusPanels : {},
+    hostPanel    : null,
+    mcuStatData  : {},
+    canbusStatData: {},
+  };
+
+  for (const [name, s] of Object.entries(mcuState)) {
+    state.mcuPanels[name] = {
+      last       : s.last,
+      errData    : s.errChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      trafficData: s.trafficChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      perfData   : s.perfChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      srttData   : s.srttChart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets    : {
+        bRetransmit   : s.bRetransmit,
+        bInvalid      : s.bInvalid,
+        bRetransmitSeq: s.bRetransmitSeq,
+        bWrite        : s.bWrite,
+        bRead         : s.bRead,
+        bAwake        : s.bAwake,
+        bTaskAvg      : s.bTaskAvg,
+        bTaskStddev   : s.bTaskStddev,
+        bSrtt         : s.bSrtt,
+        bRto          : s.bRto,
+      },
+    };
+  }
+
+  for (const [name, s] of Object.entries(canbusState)) {
+    state.canbusPanels[name] = {
+      last   : s.last,
+      data   : s.chart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets: { bRxErr: s.bRxErr, bTxErr: s.bTxErr, bTxRetry: s.bTxRetry },
+    };
+  }
+
+  const hs = hostState['system_stats'];
+  if (hs) {
+    state.hostPanel = {
+      last   : hs.last,
+      data   : hs.chart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets: { bSysload: hs.bSysload, bMemAvail: hs.bMemAvail },
+    };
+  }
+
+  for (const [key, sc] of Object.entries(mcuStatCharts)) {
+    state.mcuStatData[key] = sc.chart.data.datasets.map(d => pruneOldPoints(d.data));
+  }
+  for (const [key, sc] of Object.entries(canbusStatCharts)) {
+    state.canbusStatData[key] = sc.chart.data.datasets.map(d => pruneOldPoints(d.data));
+  }
+
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    log(`Could not save history to localStorage: ${e.message}`, 'warn');
+  }
+}
+
+/**
+ * Restore chart data and bucket state from localStorage.
+ * Only restores when the stored host matches the current connection.
+ * Panels must already be created before calling this.
+ */
+function restoreFromLocalStorage() {
+  let state;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    state = JSON.parse(raw);
+  } catch (e) {
+    log('Could not load history from localStorage (corrupt data — cleared).', 'warn');
+    localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+
+  if (!state || state.host !== currentHost) return;
+
+  const age = Date.now() - (state.savedAt || 0);
+  if (age > HISTORY_MS) {
+    log('Stored history is older than 12 h — discarded.', 'warn');
+    localStorage.removeItem(STORAGE_KEY);
+    return;
+  }
+
+  // Restore calibration so chart timestamps remain consistent across reloads
+  if (state.eventtimeCalibration && !eventtimeCalibration) {
+    eventtimeCalibration = state.eventtimeCalibration;
+  }
+
+  let restoredPanels = 0;
+
+  for (const [name, saved] of Object.entries(state.mcuPanels || {})) {
+    const s = mcuState[name];
+    if (!s) continue;
+    s.last = saved.last || {};
+    const charts = [
+      [s.errChart,     saved.errData],
+      [s.trafficChart, saved.trafficData],
+      [s.perfChart,    saved.perfData],
+      [s.srttChart,    saved.srttData],
+    ];
+    for (const [chart, dataArrays] of charts) {
+      if (!dataArrays) continue;
+      chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
+      chart.update('none');
+    }
+    if (saved.buckets) Object.assign(s, saved.buckets);
+    restoredPanels++;
+  }
+
+  for (const [name, saved] of Object.entries(state.canbusPanels || {})) {
+    const s = canbusState[name];
+    if (!s) continue;
+    s.last = saved.last || {};
+    if (saved.data) {
+      s.chart.data.datasets.forEach((d, i) => { d.data = saved.data[i] || []; });
+      s.chart.update('none');
+    }
+    if (saved.buckets) Object.assign(s, saved.buckets);
+    restoredPanels++;
+  }
+
+  if (state.hostPanel) {
+    const hs = hostState['system_stats'];
+    if (hs) {
+      hs.last = state.hostPanel.last || {};
+      if (state.hostPanel.data) {
+        hs.chart.data.datasets.forEach((d, i) => { d.data = state.hostPanel.data[i] || []; });
+        hs.chart.update('none');
+      }
+      if (state.hostPanel.buckets) Object.assign(hs, state.hostPanel.buckets);
+      restoredPanels++;
+    }
+  }
+
+  for (const [key, dataArrays] of Object.entries(state.mcuStatData || {})) {
+    const sc = mcuStatCharts[key];
+    if (!sc || !dataArrays) continue;
+    sc.chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
+    sc.chart.update('none');
+  }
+  for (const [key, dataArrays] of Object.entries(state.canbusStatData || {})) {
+    const sc = canbusStatCharts[key];
+    if (!sc || !dataArrays) continue;
+    sc.chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
+    sc.chart.update('none');
+  }
+
+  if (restoredPanels > 0) {
+    log(`Restored ${restoredPanels} panel(s) of history from localStorage.`, 'ok');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1323,6 +1743,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Auto-connect when served from a real printer host
     connect();
   }
+
+  // Persist chart data every 30 s and on page unload so an accidental
+  // refresh does not wipe accumulated history.
+  setInterval(saveToLocalStorage, 30_000);
+  window.addEventListener('beforeunload', saveToLocalStorage);
 });
 </script>
 
