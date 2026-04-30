@@ -308,8 +308,12 @@
       transition: color 0.15s, transform 0.2s;
     }
     .collapse-btn:hover { color: var(--text); filter: none; }
-    .panel--collapsed .collapse-btn { transform: rotate(-90deg); }
-    .panel--collapsed .panel-body   { display: none; }
+    .panel--collapsed .collapse-btn  { transform: rotate(-90deg); }
+    /* When collapsed: hide body, remove bottom padding/margin so panel
+       shrinks to header height only instead of leaving blank space.      */
+    .panel--collapsed .panel-body    { display: none; }
+    .panel--collapsed                { padding-bottom: 0; }
+    .panel--collapsed .panel-header  { margin-bottom: 0; }
 
     /* ── View toggle tabs ─────────────────────────────────────── */
     .view-tabs {
@@ -448,34 +452,73 @@ const DEVICE_PALETTE = [
 // Stat definitions for MCU and canbus — used to build the "By Stat" charts.
 // mode: 'last' for cumulative counters, 'avg' for level/rate values.
 // scale: optional function applied before storing (e.g. unit conversion).
+// title: human-readable panel/badge title.
+// tooltip: description shown when hovering the ? icon.
 const MCU_STAT_DEFS = [
-  { key: 'bytes_retransmit', label: 'bytes_retransmit', yLabel: 'bytes', mode: 'last', scale: null },
-  { key: 'bytes_invalid',    label: 'bytes_invalid',    yLabel: 'bytes', mode: 'last', scale: null },
-  { key: 'retransmit_seq',   label: 'retransmit_seq',   yLabel: 'seqs',  mode: 'last', scale: null },
-  { key: 'bytes_write',      label: 'bytes_write',      yLabel: 'bytes', mode: 'last', scale: null },
-  { key: 'bytes_read',       label: 'bytes_read',       yLabel: 'bytes', mode: 'last', scale: null },
-  { key: 'mcu_awake',        label: 'mcu_awake',        yLabel: '%',     mode: 'avg',  scale: v => v * 100 },
-  { key: 'mcu_task_avg',     label: 'mcu_task_avg',     yLabel: 'µs',    mode: 'avg',  scale: v => v * 1e6 },
-  { key: 'mcu_task_stddev',  label: 'mcu_task_stddev',  yLabel: 'µs',    mode: 'avg',  scale: v => v * 1e6 },
+  {
+    key: 'bytes_retransmit', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Retransmit Bytes (bytes_retransmit)',
+    tooltip: 'Cumulative bytes retransmitted to the MCU because an acknowledgement was not received before the RTO timer expired (host→MCU direction). Any increase indicates packet loss — check USB cable quality, CPU load, and MCU power supply.',
+  },
+  {
+    key: 'bytes_invalid', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Invalid Bytes (bytes_invalid)',
+    tooltip: 'Cumulative bytes received from the MCU that were discarded — either because they failed the CRC check (bit errors caused by electrical noise or a defective cable) or because they arrived with an unexpected sequence number. Any non-zero value warrants investigation.',
+  },
+  {
+    key: 'retransmit_seq', yLabel: 'seq #', mode: 'last', scale: null,
+    title: 'Retransmit Seq (retransmit_seq)',
+    tooltip: 'The outgoing sequence number (send_seq) at the time of the most recent retransmit event. When this value changes, a retransmit just occurred. Use together with bytes_retransmit to assess link reliability.',
+  },
+  {
+    key: 'bytes_write', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Bytes Written (bytes_write)',
+    tooltip: 'Cumulative bytes sent from the Klipper host to the MCU since the process started. Monotonically increasing.',
+  },
+  {
+    key: 'bytes_read', yLabel: 'bytes', mode: 'last', scale: null,
+    title: 'Bytes Read (bytes_read)',
+    tooltip: 'Cumulative bytes received by the Klipper host from the MCU since the process started. Monotonically increasing.',
+  },
+  {
+    key: 'mcu_awake', yLabel: '%', mode: 'avg', scale: v => v * 100,
+    title: 'MCU Awake % (mcu_awake)',
+    tooltip: 'Percentage of time the MCU spent outside its idle/sleep loop. Low values are normal. Sustained high values indicate the MCU is heavily loaded and may be unable to service all scheduled commands in time.',
+  },
+  {
+    key: 'mcu_task_avg', yLabel: 'µs', mode: 'avg', scale: v => v * 1e6,
+    title: 'MCU Task Avg (mcu_task_avg)',
+    tooltip: 'Average time in microseconds the MCU\'s internal task scheduler takes to process a single command. Reported by the MCU firmware. Higher values reduce available headroom for real-time scheduling.',
+  },
+  {
+    key: 'mcu_task_stddev', yLabel: 'µs', mode: 'avg', scale: v => v * 1e6,
+    title: 'MCU Task Stddev (mcu_task_stddev)',
+    tooltip: 'Standard deviation of the MCU task processing time in microseconds. A high standard deviation indicates inconsistent scheduling latency which can cause timing jitter in stepper or heater control.',
+  },
 ];
 
 const CANBUS_STAT_DEFS = [
-  { key: 'rx_error',   label: 'rx_error',   yLabel: 'count', mode: 'last', scale: null },
-  { key: 'tx_error',   label: 'tx_error',   yLabel: 'count', mode: 'last', scale: null },
-  { key: 'tx_retries', label: 'tx_retries', yLabel: 'count', mode: 'last', scale: null },
+  {
+    key: 'rx_error', yLabel: 'count', mode: 'last', scale: null,
+    title: 'RX Errors (rx_error)',
+    tooltip: 'Cumulative receive errors detected by the micro-controller CAN hardware. Increments on CRC errors, bit-stuffing errors, or framing errors on received frames. Per the CAN specification, a count above 127 causes the controller to enter error-passive mode where it can no longer transmit error frames.',
+  },
+  {
+    key: 'tx_error', yLabel: 'count', mode: 'last', scale: null,
+    title: 'TX Errors (tx_error)',
+    tooltip: 'Cumulative transmit errors detected by the micro-controller CAN hardware. Increments when a transmitted frame is not acknowledged by any node on the bus. High values indicate missing bus termination, an open circuit, or a disconnected device. Note: rp2040/rp2350 MCUs always report this as 0.',
+  },
+  {
+    key: 'tx_retries', yLabel: 'count', mode: 'last', scale: null,
+    title: 'TX Retries (tx_retries)',
+    tooltip: 'Number of CAN frame transmit attempts that were retried due to bus contention (arbitration loss) or transmission errors. Only reported as non-zero by rp2040/rp2350 micro-controllers; always 0 on other MCU types.',
+  },
 ];
 
 // ── State ────────────────────────────────────────────────────
 let ws          = null;
 let msgId       = 1;
 let currentHost = null;     // host we last successfully initialised against
-
-/**
- * Calibration between Klipper's internal monotonic clock (eventtime, seconds
- * since process start) and the browser's wall-clock milliseconds.
- * Set once on subscribe and re-used for every subsequent notification.
- */
-let eventtimeCalibration = null; // { klipper: float, wallMs: number }
 
 const pending          = {};  // id → {resolve, reject}
 const mcuState         = {};  // name → {errChart, trafficChart, perfChart, srttChart, statsEl, b*}
@@ -592,10 +635,9 @@ function connect() {
     }
 
     // Subscription notification
-    // params[0] = status dict, params[1] = Klipper eventtime (seconds, monotonic)
+    // params[0] = status dict, params[1] = Klipper eventtime (ignored — we use Date.now())
     if (msg.method === 'notify_status_update' && Array.isArray(msg.params)) {
-      const [status, eventtime] = msg.params;
-      handleUpdate(status, false, eventtimeToMs(eventtime));
+      handleUpdate(msg.params[0], false, Date.now());
     }
   };
 }
@@ -650,7 +692,6 @@ function clearPanels() {
   document.getElementById('canbus-section').style.display        = 'none';
   document.getElementById('mcu-stat-section').style.display      = 'none';
   document.getElementById('canbus-stat-section').style.display   = 'none';
-  eventtimeCalibration = null;
   currentHost = null;
   try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
 }
@@ -770,23 +811,14 @@ async function initialise() {
     const subRes = await sendRpc('printer.objects.subscribe', { objects: subObjects });
     log('Subscribed to object updates.', 'ok');
 
-    // Calibrate Klipper's internal eventtime against browser wall-clock so
-    // timestamps on all subsequent notifications map to real calendar time.
-    if (subRes && subRes.eventtime) {
-      calibrateEventtime(subRes.eventtime);
-      log(`Eventtime calibrated (Klipper t=${subRes.eventtime.toFixed(3)} s).`);
-    }
-
     // Process the status snapshot from the subscribe response immediately so
     // charts have baseline values before the first live update arrives.
     if (subRes && subRes.status) {
-      const ts = eventtimeToMs(subRes.eventtime);
-      handleUpdate(subRes.status, true, ts);
+      handleUpdate(subRes.status, true, Date.now());
     }
 
     // Fetch a full snapshot via HTTP to pre-populate fields that Moonraker omits
     // from subscribe/notify when their value almost never changes.
-    // Uses GET /printer/objects/query?obj1&obj2%20name&... (bare key per object).
     try {
       const qs  = Object.keys(subObjects).map(k => encodeURIComponent(k)).join('&');
       const url = `${httpUrl(currentHost)}/printer/objects/query?${qs}`;
@@ -794,8 +826,7 @@ async function initialise() {
       if (!res.ok) throw new Error(`HTTP ${res.status} — check that Moonraker is running and CORS is allowed`);
       const json = await res.json();
       if (json && json.result && json.result.status) {
-        const ts = json.result.eventtime ? eventtimeToMs(json.result.eventtime) : Date.now();
-        handleUpdate(json.result.status, true, ts);
+        handleUpdate(json.result.status, true, Date.now());
       }
     } catch (queryError) {
       log(`Initial HTTP snapshot failed (non-fatal): ${queryError.message}`, 'warn');
@@ -816,29 +847,6 @@ function handleUpdate(status, seed = false, ts = Date.now()) {
       onHostData(data, ts, seed);
     }
   }
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  Eventtime calibration
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Record a mapping between Klipper's monotonic eventtime (seconds since
- * process start) and the current browser wall-clock milliseconds.
- * Call once after the subscribe response which carries eventtime.
- */
-function calibrateEventtime(klipperEventtime) {
-  eventtimeCalibration = { klipper: klipperEventtime, wallMs: Date.now() };
-}
-
-/**
- * Convert a Klipper eventtime (seconds, monotonic) to a wall-clock ms value
- * suitable for Chart.js time-axis points.  Falls back to Date.now() when no
- * calibration is available (e.g. from a plain HTTP snapshot).
- */
-function eventtimeToMs(klipperEventtime) {
-  if (!eventtimeCalibration || klipperEventtime === null || klipperEventtime === undefined) return Date.now();
-  return eventtimeCalibration.wallMs + (klipperEventtime - eventtimeCalibration.klipper) * 1000;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1164,21 +1172,21 @@ function onMcuData(name, stats, ts, seed = false) {
 
   s.statsEl.innerHTML =
     sb('Bytes written',     fmtBytes(L.bytes_write ?? 0), '',
-       'Total bytes transmitted from host to MCU since process start (cumulative).') +
+       'Cumulative bytes sent from the Klipper host to this MCU since the process started.') +
     sb('Bytes read',        fmtBytes(L.bytes_read  ?? 0), '',
-       'Total bytes received from MCU to host since process start (cumulative).') +
+       'Cumulative bytes received by the Klipper host from this MCU since the process started.') +
     sb('Retransmit bytes',  retransmitBytes, retransmitBytes > 0 ? 'warn' : 'ok',
-       'Bytes retransmitted due to a missing acknowledgement or CRC failure. Any non-zero value indicates link errors.') +
+       'Cumulative bytes retransmitted to the MCU because an acknowledgement was not received before the RTO timer expired. Any increase indicates packet loss on the link — check USB/UART cable quality, CPU load, and MCU power supply.') +
     sb('Invalid bytes',     invalidBytes, invalidBytes > 0 ? 'err' : 'ok',
-       'Bytes discarded because the CRC check failed on receive. Indicates electrical noise or a bad cable/connector.') +
+       'Cumulative bytes received from the MCU that were discarded — either due to a CRC failure (bit errors caused by noise or a defective cable) or an unexpected sequence number. Any non-zero value warrants investigation.') +
     sb('Send seq',          L.send_seq    ?? '—', '',
-       'Outgoing message sequence number (host → MCU). Wraps at the 16-bit boundary; used to detect dropped messages.') +
+       'Current outgoing message sequence number (host → MCU). Monotonically increasing (wraps at the 16-bit boundary); used to detect dropped messages.') +
     sb('Receive seq',       L.receive_seq ?? '—', '',
-       'Incoming message sequence number (MCU → host). A gap between send_seq and receive_seq means messages were lost.') +
+       'Expected incoming sequence number from the MCU. A sustained gap versus send_seq indicates unacknowledged messages.') +
     sb('SRTT',              srttDisplay, '',
-       'Smoothed Round-Trip Time — exponential moving average of MCU acknowledgement latency (similar to TCP SRTT). Higher values mean more latency.') +
+       'Smoothed Round-Trip Time (RFC 6298) — exponential moving average of message acknowledgement latency. Calculated from the time a message is sent to when its ACK is received. Higher values mean more host↔MCU latency.') +
     sb('RTO',               rtoDisplay, '',
-       'Retransmission Timeout — threshold after which an unacknowledged message is resent. Derived from SRTT plus variance.');
+       'Retransmission Timeout — interval after which an unacknowledged message is resent. Derived from SRTT + 4×RTTVAR (RFC 6298). Clamped to 25 ms – 5 s by Klipper.');
 
   // Choose between immediate seed point and normal bucketed accumulation.
   const applyChart = seed
@@ -1304,11 +1312,11 @@ function onCanbusData(name, data, ts, seed = false) {
 
   s.statsEl.innerHTML =
     sb('RX errors',   rxErrors,  rxErrors  > 0 ? 'warn' : 'ok',
-       'CAN controller receive error counter. Increments when a received frame fails validation. Per CAN spec, values above 127 trigger passive mode.') +
+       'Cumulative receive errors detected by the MCU CAN hardware. Increments on CRC errors, bit-stuffing, or framing errors. Per the CAN spec, values above 127 cause the controller to enter error-passive mode (no longer transmits error frames).') +
     sb('TX errors',   txErrors,  txErrors  > 0 ? 'warn' : 'ok',
-       'CAN controller transmit error counter. Increments when a transmitted frame is not acknowledged by any other node on the bus.') +
+       'Cumulative transmit errors detected by the MCU CAN hardware. Increments when a transmitted frame receives no acknowledgement from any bus node. High values indicate missing termination or a disconnected device. Note: rp2040/rp2350 MCUs always report 0 here.') +
     sb('TX retries',  txRetries, txRetries > 0 ? 'warn' : 'ok',
-       'Number of CAN frames retransmitted after a transmission error. Indicates bus contention or a noisy/faulty CAN connection.');
+       'Number of CAN frame transmit attempts retried due to bus contention (arbitration loss) or errors. Only non-zero on rp2040/rp2350 micro-controllers; always 0 on other MCU types.');
 
   const applyChart = seed
     ? (chart, dsIdx, b, val) => seedChart(chart, dsIdx, b, ts, val)
@@ -1434,9 +1442,12 @@ function createMcuStatCharts(mcuObjs) {
     const panelEl = document.createElement('div');
     panelEl.className = 'panel';
     panelEl.dataset.panelId = panelId;
+    const ttHtml = def.tooltip
+      ? `<span class="tt" data-tip="${htmlEscape(def.tooltip)}">?</span>`
+      : '';
     panelEl.innerHTML = `
       <div class="panel-header">
-        <div class="panel-title">📊 ${def.label}</div>
+        <div class="panel-title">📊 ${def.title}${ttHtml}</div>
         <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
       </div>
       <div class="panel-body">
@@ -1478,9 +1489,12 @@ function createCanbusStatCharts(canbusObjs) {
     const panelEl = document.createElement('div');
     panelEl.className = 'panel';
     panelEl.dataset.panelId = panelId;
+    const ttHtml = def.tooltip
+      ? `<span class="tt" data-tip="${htmlEscape(def.tooltip)}">?</span>`
+      : '';
     panelEl.innerHTML = `
       <div class="panel-header">
-        <div class="panel-title">📊 ${def.label}</div>
+        <div class="panel-title">📊 ${def.title}${ttHtml}</div>
         <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
       </div>
       <div class="panel-body">
@@ -1577,7 +1591,6 @@ function saveToLocalStorage() {
     version   : 1,
     host      : currentHost,
     savedAt   : Date.now(),
-    eventtimeCalibration,
     mcuPanels    : {},
     canbusPanels : {},
     hostPanel    : null,
@@ -1662,11 +1675,6 @@ function restoreFromLocalStorage() {
     log('Stored history is older than 12 h — discarded.', 'warn');
     localStorage.removeItem(STORAGE_KEY);
     return;
-  }
-
-  // Restore calibration so chart timestamps remain consistent across reloads
-  if (state.eventtimeCalibration && !eventtimeCalibration) {
-    eventtimeCalibration = state.eventtimeCalibration;
   }
 
   let restoredPanels = 0;
