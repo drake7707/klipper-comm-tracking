@@ -389,6 +389,11 @@
       <h2>CAN Bus Statistics — By Device</h2>
       <div class="panels-grid" id="canbus-panels"></div>
     </section>
+
+    <section id="sensor-section" style="display:none">
+      <h2>Temperatures &amp; Heater Power</h2>
+      <div class="panels-grid" id="sensor-panels"></div>
+    </section>
   </div>
 
   <!-- ── By-Stat view ───────────────────────────────────────── -->
@@ -525,8 +530,11 @@ const pending          = {};  // id → {resolve, reject}
 const mcuState         = {};  // name → {errChart, trafficChart, perfChart, srttChart, statsEl, b*}
 const canbusState      = {};  // name → {chart, statsEl, stateEl, b*}
 const hostState        = {};  // 'system_stats' → {chart, statsEl, bSysload, bMemAvail, last}
-const mcuStatCharts    = {};  // statKey → {chart, buckets:{mcuName→bucket}, def, dsIdx:{mcuName→int}}
-const canbusStatCharts = {};  // statKey → {chart, buckets:{canbusName→bucket}, def, dsIdx:{canbusName→int}}
+const mcuStatCharts    = {};  // statKey → {chart, buckets:{mcuName→bucket}, def, dsIdx:{mcuName→int}, statsEl, latestValues}
+const canbusStatCharts = {};  // statKey → {chart, buckets:{canbusName→bucket}, def, dsIdx:{canbusName→int}, statsEl, latestValues}
+
+let tempChartObj        = null;  // {chart, statsEl, dsIdx, buckets, latestValues, palette}
+let heaterPowerChartObj = null;  // {chart, statsEl, dsIdx, buckets, latestValues, palette}
 
 // ── Logging ──────────────────────────────────────────────────
 function log(msg, cls = '') {
@@ -675,6 +683,8 @@ function clearPanels() {
   }
   for (const sc of Object.values(mcuStatCharts))    sc.chart.destroy();
   for (const sc of Object.values(canbusStatCharts)) sc.chart.destroy();
+  if (tempChartObj)        { tempChartObj.chart.destroy();        tempChartObj = null; }
+  if (heaterPowerChartObj) { heaterPowerChartObj.chart.destroy(); heaterPowerChartObj = null; }
 
   for (const k of Object.keys(mcuState))         delete mcuState[k];
   for (const k of Object.keys(canbusState))       delete canbusState[k];
@@ -687,12 +697,14 @@ function clearPanels() {
   document.getElementById('canbus-panels').innerHTML        = '';
   document.getElementById('mcu-stat-panels').innerHTML      = '';
   document.getElementById('canbus-stat-panels').innerHTML   = '';
+  document.getElementById('sensor-panels').innerHTML        = '';
 
   document.getElementById('host-section').style.display          = 'none';
   document.getElementById('mcu-section').style.display           = 'none';
   document.getElementById('canbus-section').style.display        = 'none';
   document.getElementById('mcu-stat-section').style.display      = 'none';
   document.getElementById('canbus-stat-section').style.display   = 'none';
+  document.getElementById('sensor-section').style.display        = 'none';
   currentHost = null;
   try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
 }
@@ -753,6 +765,24 @@ function clearChartData() {
       sc.buckets[name] = makeBuckets(sc.def.mode);
     }
   }
+  // Temperature sensor chart
+  if (tempChartObj) {
+    tempChartObj.chart.data.datasets.forEach(d => { d.data = []; });
+    tempChartObj.chart.update('none');
+    for (const name of Object.keys(tempChartObj.buckets)) {
+      tempChartObj.buckets[name] = makeBuckets('avg');
+    }
+    tempChartObj.latestValues = {};
+  }
+  // Heater power chart
+  if (heaterPowerChartObj) {
+    heaterPowerChartObj.chart.data.datasets.forEach(d => { d.data = []; });
+    heaterPowerChartObj.chart.update('none');
+    for (const name of Object.keys(heaterPowerChartObj.buckets)) {
+      heaterPowerChartObj.buckets[name] = makeBuckets('avg');
+    }
+    heaterPowerChartObj.latestValues = {};
+  }
   log('Chart data cleared.', 'info');
   // Also clear persisted storage so stale data is not restored on next reload
   try { localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable */ }
@@ -770,12 +800,16 @@ async function initialise() {
     const mcuObjs    = objects.filter(o => o === 'mcu' || o.startsWith('mcu '));
     const canbusObjs = objects.filter(o => o.startsWith('canbus_stats'));
     const hasHost    = objects.includes('system_stats');
+    const tempSensorObjs = objects.filter(o => o.startsWith('temperature_sensor'));
+    const heaterObjs     = objects.filter(o => o === 'extruder' || /^extruder\d+$/.test(o) || o === 'heater_bed');
 
     log(`MCUs: ${mcuObjs.join(', ') || '(none)'}`);
     log(`CAN interfaces: ${canbusObjs.join(', ') || '(none)'}`);
+    log(`Temp sensors: ${tempSensorObjs.join(', ') || '(none)'}`);
+    log(`Heaters: ${heaterObjs.join(', ') || '(none)'}`);
 
-    if (!mcuObjs.length && !canbusObjs.length && !hasHost) {
-      log('No MCU, canbus_stats, or system_stats objects found.', 'err');
+    if (!mcuObjs.length && !canbusObjs.length && !hasHost && !tempSensorObjs.length && !heaterObjs.length) {
+      log('No MCU, canbus_stats, system_stats, temperature_sensor, or heater objects found.', 'err');
       return;
     }
 
@@ -789,6 +823,11 @@ async function initialise() {
     if (mcuObjs.length    && !mcuStatCharts[MCU_STAT_DEFS[0].key])       createMcuStatCharts(mcuObjs);
     if (canbusObjs.length && !canbusStatCharts[CANBUS_STAT_DEFS[0].key]) createCanbusStatCharts(canbusObjs);
 
+    // Sensor panels are created once per session when any relevant object is found.
+    if ((tempSensorObjs.length || heaterObjs.length) && !tempChartObj && !heaterPowerChartObj) {
+      createSensorPanels(tempSensorObjs, heaterObjs);
+    }
+
     if (hasHost)          document.getElementById('host-section').style.display        = '';
     if (mcuObjs.length) {
       document.getElementById('mcu-section').style.display     = '';
@@ -798,6 +837,9 @@ async function initialise() {
       document.getElementById('canbus-section').style.display     = '';
       document.getElementById('canbus-stat-section').style.display = '';
     }
+    if (tempSensorObjs.length || heaterObjs.length) {
+      document.getElementById('sensor-section').style.display = '';
+    }
 
     // Restore persisted history before subscribing so charts are pre-populated.
     restoreFromLocalStorage();
@@ -806,8 +848,10 @@ async function initialise() {
     // Build subscription request – null means subscribe to all fields
     const subObjects = {};
     if (hasHost) subObjects['system_stats'] = null;
-    mcuObjs.forEach(o    => { subObjects[o] = null; });
-    canbusObjs.forEach(o => { subObjects[o] = null; });
+    mcuObjs.forEach(o        => { subObjects[o] = null; });
+    canbusObjs.forEach(o     => { subObjects[o] = null; });
+    tempSensorObjs.forEach(o => { subObjects[o] = null; });
+    heaterObjs.forEach(o     => { subObjects[o] = null; });
 
     const subRes = await sendRpc('printer.objects.subscribe', { objects: subObjects });
     log('Subscribed to object updates.', 'ok');
@@ -846,6 +890,10 @@ function handleUpdate(status, seed = false, ts = Date.now()) {
       if (canbusState[name]) onCanbusData(name, data, ts, seed);
     } else if (name === 'system_stats') {
       onHostData(data, ts, seed);
+    } else if (name.startsWith('temperature_sensor')) {
+      onTempSensorData(name, data, ts, seed);
+    } else if (name === 'extruder' || /^extruder\d+$/.test(name) || name === 'heater_bed') {
+      onHeaterData(name, data, ts, seed);
     }
   }
 }
@@ -1246,6 +1294,15 @@ function onMcuData(name, stats, ts, seed = false) {
     if (applyChart(sc.chart, dsIdx, sc.buckets[name], val)) {
       sc.chart.update('none');
     }
+    // Update latest-value badge for this MCU in the stat panel
+    sc.latestValues[name] = val;
+    sc.statsEl.innerHTML = Object.entries(sc.dsIdx).map(([n, i]) => {
+      const v     = sc.latestValues[n];
+      const label = n === 'mcu' ? 'Main MCU' : n.replace('mcu ', '');
+      const valStr = v != null ? fmtStatVal(v, def.yLabel) : '—';
+      const color  = DEVICE_PALETTE[i % DEVICE_PALETTE.length];
+      return `<span class="sb"><span class="lbl">${label}:</span><span class="val" style="color:${color}">${valStr}</span></span>`;
+    }).join('');
   }
 }
 
@@ -1354,6 +1411,15 @@ function onCanbusData(name, data, ts, seed = false) {
     if (applyChart(sc.chart, dsIdx, sc.buckets[name], val)) {
       sc.chart.update('none');
     }
+    // Update latest-value badge for this interface in the stat panel
+    sc.latestValues[name] = val;
+    sc.statsEl.innerHTML = Object.entries(sc.dsIdx).map(([n, i]) => {
+      const v     = sc.latestValues[n];
+      const label = n.replace('canbus_stats ', '');
+      const valStr = v != null ? fmtStatVal(v, def.yLabel) : '—';
+      const color  = DEVICE_PALETTE[i % DEVICE_PALETTE.length];
+      return `<span class="sb"><span class="lbl">${label}:</span><span class="val" style="color:${color}">${valStr}</span></span>`;
+    }).join('');
   }
 }
 
@@ -1465,6 +1531,7 @@ function createMcuStatCharts(mcuObjs) {
         <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
       </div>
       <div class="panel-body">
+        <div class="stats-row" id="mcu-stat-badges-${def.key}"></div>
         <div class="chart-block">
           <div class="chart-wrap"><canvas id="mcu-stat-chart-${def.key}"></canvas></div>
         </div>
@@ -1493,7 +1560,10 @@ function createMcuStatCharts(mcuObjs) {
       dsIdx[name]   = i;
     });
 
-    mcuStatCharts[def.key] = { chart, buckets, dsIdx, def };
+    mcuStatCharts[def.key] = { chart, buckets, dsIdx, def,
+      statsEl     : document.getElementById(`mcu-stat-badges-${def.key}`),
+      latestValues: {},
+    };
   }
 }
 
@@ -1512,6 +1582,7 @@ function createCanbusStatCharts(canbusObjs) {
         <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
       </div>
       <div class="panel-body">
+        <div class="stats-row" id="can-stat-badges-${def.key}"></div>
         <div class="chart-block">
           <div class="chart-wrap"><canvas id="can-stat-chart-${def.key}"></canvas></div>
         </div>
@@ -1540,8 +1611,151 @@ function createCanbusStatCharts(canbusObjs) {
       dsIdx[name]   = i;
     });
 
-    canbusStatCharts[def.key] = { chart, buckets, dsIdx, def };
+    canbusStatCharts[def.key] = { chart, buckets, dsIdx, def,
+      statsEl     : document.getElementById(`can-stat-badges-${def.key}`),
+      latestValues: {},
+    };
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Sensor panels — Temperature sensors & Heater power
+// ═══════════════════════════════════════════════════════════════
+
+function createSensorPanels(tempObjs, heaterObjs) {
+  if (tempObjs.length) {
+    const panelEl = document.createElement('div');
+    panelEl.className = 'panel';
+    panelEl.dataset.panelId = 'sensor-temp';
+    panelEl.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">🌡️ Temperatures</div>
+        <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
+      </div>
+      <div class="panel-body">
+        <div class="stats-row" id="temp-stats"></div>
+        <div class="chart-block">
+          <div class="chart-wrap"><canvas id="temp-chart"></canvas></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('sensor-panels').appendChild(panelEl);
+
+    const palette  = tempObjs.map((_, i) => DEVICE_PALETTE[i % DEVICE_PALETTE.length]);
+    const datasets = tempObjs.map((name, i) =>
+      ds(name.replace('temperature_sensor ', ''), palette[i])
+    );
+    const chart = makeChart(
+      document.getElementById('temp-chart').getContext('2d'),
+      datasets,
+      {
+        x: BASE_SCALE_X,
+        y: { ...BASE_SCALE_Y, title: { display: true, text: '°C', color: '#a0a0b0', font: { size: 10 } } },
+      },
+    );
+
+    const dsIdx = {}, buckets = {};
+    tempObjs.forEach((name, i) => { dsIdx[name] = i; buckets[name] = makeBuckets('avg'); });
+
+    tempChartObj = { chart, statsEl: document.getElementById('temp-stats'),
+      dsIdx, buckets, palette, latestValues: {} };
+  }
+
+  if (heaterObjs.length) {
+    const panelEl = document.createElement('div');
+    panelEl.className = 'panel';
+    panelEl.dataset.panelId = 'sensor-heater';
+    panelEl.innerHTML = `
+      <div class="panel-header">
+        <div class="panel-title">🔥 Heater Power</div>
+        <button class="collapse-btn" onclick="togglePanel(this)" title="Collapse / Expand">▼</button>
+      </div>
+      <div class="panel-body">
+        <div class="stats-row" id="heater-stats"></div>
+        <div class="chart-block">
+          <div class="chart-wrap"><canvas id="heater-chart"></canvas></div>
+        </div>
+      </div>
+    `;
+    document.getElementById('sensor-panels').appendChild(panelEl);
+
+    const palette  = heaterObjs.map((_, i) => DEVICE_PALETTE[i % DEVICE_PALETTE.length]);
+    const datasets = heaterObjs.map((name, i) => {
+      const label = name === 'extruder' ? 'Extruder'
+                  : name === 'heater_bed' ? 'Bed'
+                  : name;
+      return ds(label, palette[i]);
+    });
+    const chart = makeChart(
+      document.getElementById('heater-chart').getContext('2d'),
+      datasets,
+      {
+        x: BASE_SCALE_X,
+        y: { ...BASE_SCALE_Y, max: 100,
+             title: { display: true, text: '%', color: '#a0a0b0', font: { size: 10 } } },
+      },
+    );
+
+    const dsIdx = {}, buckets = {};
+    heaterObjs.forEach((name, i) => { dsIdx[name] = i; buckets[name] = makeBuckets('avg'); });
+
+    heaterPowerChartObj = { chart, statsEl: document.getElementById('heater-stats'),
+      dsIdx, buckets, palette, latestValues: {} };
+  }
+}
+
+function onTempSensorData(name, data, ts, seed = false) {
+  const tc = tempChartObj;
+  if (!tc) return;
+  const dsIdx = tc.dsIdx[name];
+  if (dsIdx === undefined) return;
+  if (data.temperature === undefined || data.temperature === null) return;
+
+  const val = data.temperature;
+  tc.latestValues[name] = val;
+
+  const applyChart = seed
+    ? (c, i, b, v) => seedChart(c, i, b, ts, v)
+    : (c, i, b, v) => pushBucketed(c, i, b, ts, v);
+
+  if (applyChart(tc.chart, dsIdx, tc.buckets[name], val)) {
+    tc.chart.update('none');
+  }
+
+  tc.statsEl.innerHTML = Object.entries(tc.dsIdx).map(([n, i]) => {
+    const v     = tc.latestValues[n];
+    const label = n.replace('temperature_sensor ', '');
+    const valStr = v != null ? v.toFixed(1) + ' °C' : '—';
+    const color  = tc.palette[i];
+    return `<span class="sb"><span class="lbl">${label}:</span><span class="val" style="color:${color}">${valStr}</span></span>`;
+  }).join('');
+}
+
+function onHeaterData(name, data, ts, seed = false) {
+  const hc = heaterPowerChartObj;
+  if (!hc) return;
+  const dsIdx = hc.dsIdx[name];
+  if (dsIdx === undefined) return;
+  if (data.power === undefined || data.power === null) return;
+
+  const val = data.power * 100; // 0–1 → 0–100 %
+  hc.latestValues[name] = val;
+
+  const applyChart = seed
+    ? (c, i, b, v) => seedChart(c, i, b, ts, v)
+    : (c, i, b, v) => pushBucketed(c, i, b, ts, v);
+
+  if (applyChart(hc.chart, dsIdx, hc.buckets[name], val)) {
+    hc.chart.update('none');
+  }
+
+  hc.statsEl.innerHTML = Object.entries(hc.dsIdx).map(([n, i]) => {
+    const v     = hc.latestValues[n];
+    const label = n === 'extruder' ? 'Extruder' : n === 'heater_bed' ? 'Bed' : n;
+    const valStr = v != null ? v.toFixed(1) + ' %' : '—';
+    const color  = hc.palette[i];
+    return `<span class="sb"><span class="lbl">${label}:</span><span class="val" style="color:${color}">${valStr}</span></span>`;
+  }).join('');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1581,6 +1795,20 @@ function sb(label, value, cls = '', tooltip = '') {
     ? `<span class="tt" data-tip="${htmlEscape(tooltip)}">?</span>`
     : '';
   return `<span class="sb ${cls}"><span class="lbl">${label}${ttHtml}:</span><span class="val">${value}</span></span>`;
+}
+
+/**
+ * Format a stat value with an appropriate number of decimals given its unit.
+ */
+function fmtStatVal(v, unit) {
+  if (unit === 'bytes') return fmtBytes(v);
+  if (unit === '%')     return v.toFixed(1) + ' %';
+  if (unit === 'µs')    return v.toFixed(2) + ' µs';
+  if (unit === 'ms')    return v.toFixed(3) + ' ms';
+  if (unit === 'seq #') return Math.round(v).toString();
+  if (unit === 'count') return Math.round(v).toString();
+  if (unit === '°C')    return v.toFixed(1) + ' °C';
+  return v.toFixed(2) + (unit ? ' ' + unit : '');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1656,6 +1884,21 @@ function saveToLocalStorage() {
   }
   for (const [key, sc] of Object.entries(canbusStatCharts)) {
     state.canbusStatData[key] = sc.chart.data.datasets.map(d => pruneOldPoints(d.data));
+  }
+
+  if (tempChartObj) {
+    state.tempData = {
+      data        : tempChartObj.chart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets     : tempChartObj.buckets,
+      latestValues: tempChartObj.latestValues,
+    };
+  }
+  if (heaterPowerChartObj) {
+    state.heaterData = {
+      data        : heaterPowerChartObj.chart.data.datasets.map(d => pruneOldPoints(d.data)),
+      buckets     : heaterPowerChartObj.buckets,
+      latestValues: heaterPowerChartObj.latestValues,
+    };
   }
 
   try {
@@ -1762,6 +2005,23 @@ function restoreFromLocalStorage() {
     if (sc.chart.data.datasets.some(d => d.data.length > 0)) continue;
     sc.chart.data.datasets.forEach((d, i) => { d.data = dataArrays[i] || []; });
     sc.chart.update('none');
+  }
+
+  if (state.tempData && tempChartObj) {
+    if (!tempChartObj.chart.data.datasets.some(d => d.data.length > 0)) {
+      tempChartObj.chart.data.datasets.forEach((d, i) => { d.data = (state.tempData.data || [])[i] || []; });
+      tempChartObj.chart.update('none');
+      if (state.tempData.buckets)      Object.assign(tempChartObj.buckets, state.tempData.buckets);
+      if (state.tempData.latestValues) Object.assign(tempChartObj.latestValues, state.tempData.latestValues);
+    }
+  }
+  if (state.heaterData && heaterPowerChartObj) {
+    if (!heaterPowerChartObj.chart.data.datasets.some(d => d.data.length > 0)) {
+      heaterPowerChartObj.chart.data.datasets.forEach((d, i) => { d.data = (state.heaterData.data || [])[i] || []; });
+      heaterPowerChartObj.chart.update('none');
+      if (state.heaterData.buckets)      Object.assign(heaterPowerChartObj.buckets, state.heaterData.buckets);
+      if (state.heaterData.latestValues) Object.assign(heaterPowerChartObj.latestValues, state.heaterData.latestValues);
+    }
   }
 
   if (restoredPanels > 0) {
